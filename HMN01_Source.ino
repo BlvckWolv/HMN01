@@ -12,6 +12,7 @@
 // - THEME: Catppuccin Frappé (tuned for ST7789) + Material-ish shadow on pill/modals
 // - Text color for active tasks = pure white; completed stays dim.
 // - MOVE mode color set to #EED49F.
+// - Highlight pill now sized from bracket glyph with equal top/bottom gap.
 //
 // Teensy 4.x + Nano ESP32 both compile. ESP32 uses Preferences; Teensy has a no-op shim.
 
@@ -94,6 +95,7 @@ const uint8_t  ANIM_DELAY_MS = 12;
 const uint8_t  HIL_RADIUS         = 3;
 const bool     HIL_BORDER_ENABLED = true;
 const bool     HIL_BORDER_ACCENT  = true;   // accent border for clearer edge
+const uint8_t  HIL_GAP            = 2;      // <<< NEW: px gap above/below bracket glyph
 
 // ---- Text / glyph tweaks ----
 const int8_t   TEXT_Y_TWEAK       = 1;
@@ -424,7 +426,7 @@ namespace Btn {
       b.nextRpt    = now + HOLD_START_MS;
       b.ev |= EV_EDGE_PRESS;
     }
-    if (b.debPressed && !b.raw && (now - b.tReleaseStart >= MIN_RELEASE_MS)) {
+    if (b.debPressed && !r && (now - b.tReleaseStart >= MIN_RELEASE_MS)) {
       b.debPressed = false;
       b.repeating  = false;
       b.ev |= EV_EDGE_REL;
@@ -586,11 +588,6 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
   listCanvas.getTextBounds("[", 0, 0, &lbx, &lby, &lW, &lH);
   listCanvas.getTextBounds("X", 0, 0, &xbx, &xby, &xW, &xH);
   listCanvas.getTextBounds("]", 0, 0, &rbx, &rby, &rW, &rH);
-  listCanvas.getTextBounds(" ", 0, 0, &sbx, &sby, &sW, &sH);
-
-  int16_t insideW = (xW > sW) ? (int16_t)xW : (int16_t)sW;
-  insideW += (int16_t)BAR_EXPAND_X;
-  if (insideW < 1) insideW = 1;
 
   int16_t cbh = lH; if (xH > cbh) cbh = xH; if (rH > cbh) cbh = rH;
 
@@ -600,13 +597,13 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
 
   int16_t checkX = PAD_X;
   int16_t xInsideStart = checkX + (int16_t)lW;
-  int16_t xRightPos    = xInsideStart + insideW;
+  int16_t xRightPos    = xInsideStart + ( (xW > (uint16_t)8 ? (int16_t)xW : 8) + (int16_t)BAR_EXPAND_X );
   bool    isSelected   = (taskIndex == selected);
 
   // Colors (with optional fade)
   uint16_t colBracket = colorForPriority(tasks[taskIndex].prio);
   uint16_t colMark    = isSelected ? COL_X_HARD : COL_FOOT;
-  uint16_t colText    = tasks[taskIndex].done ? COL_DIM : COL_WHITE;  // <-- ACTIVE TASKS = WHITE
+  uint16_t colText    = tasks[taskIndex].done ? COL_DIM : COL_WHITE;  // ACTIVE TASKS = WHITE
   uint16_t colStrike  = COL_DIM;
 
   if (fadeAlpha >= 0) {
@@ -620,7 +617,7 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
   // Completed mark (inside [ ])
   if (tasks[taskIndex].done) {
     int16_t left   = xInsideStart;
-    int16_t w      = insideW;
+    int16_t w      = xRightPos - xInsideStart;
     int16_t cx     = left + w/2;
     int16_t cy     = checkTop + cbh/2;
 
@@ -669,13 +666,14 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
   listCanvas.setCursor(xRightPos, baseR); listCanvas.print("]");
 
   // --- Text area ---
-  const int16_t textX0 = checkX + (int16_t)lW + insideW + (int16_t)rW + CHECK_GAP;
+  const int16_t textX0 = PAD_X + (int16_t)lW + (xRightPos - xInsideStart) + (int16_t)rW + CHECK_GAP;
   int16_t availW = W - PAD_X - textX0; if (availW < 1) availW = 1;
 
   if (marqueeOffsetPx >= 0 && isSelected) {
-    // Mask-based scrolling so the pill doesn't change size
-    const int16_t pillH = ROW_HEIGHT - 6;
-    const int16_t pillY = y + (ROW_HEIGHT - pillH)/2;
+    // --- NEW: compute pill mask height from bracket glyph to keep gaps equal ---
+    int16_t pillH = cbh + 2 * (int16_t)HIL_GAP;
+    int16_t rowCenterY = y + (int16_t)ROW_HEIGHT/2;
+    int16_t pillY = rowCenterY - cbh/2 - (int16_t)HIL_GAP + TEXT_Y_TWEAK + BRACKET_Y_TWEAK;
 
     int16_t bx, by; uint16_t fullW, fullH;
     listCanvas.getTextBounds(tasks[taskIndex].text, 0, 0, &bx, &by, &fullW, &fullH);
@@ -692,8 +690,7 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
     mc.setCursor(x0 + (int16_t)fullW + (int16_t)MARQUEE_GAP_PX, textYlocal);
     mc.print(tasks[taskIndex].text);
 
-    listCanvas.drawBitmap(textX0, pillY, mc.getBuffer(), mc.width(), mc.height(),
-                          colText); // use computed text color
+    listCanvas.drawBitmap(textX0, pillY, mc.getBuffer(), mc.width(), mc.height(), colText);
 
     if (tasks[taskIndex].done) {
       int16_t mid = pillY + pillH/2;
@@ -718,7 +715,7 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
 
     int16_t textY = y + ((ROW_HEIGHT - (int16_t)bh) / 2) - by + TEXT_Y_TWEAK;
     listCanvas.setCursor(textX0, textY);
-    listCanvas.setTextColor(colText);     // use computed text color
+    listCanvas.setTextColor(colText);
     listCanvas.print(buf);
 
     if (tasks[taskIndex].done) {
@@ -734,8 +731,32 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
 void composeListFrame(float hlRowY) {
   listCanvas.fillRect(0, 0, W, LIST_CANVAS_H, COL_BG);
 
-  int16_t pillX = 4, pillW = W - 8, pillH = ROW_HEIGHT - 6;
-  int16_t pillY = (int16_t)(TOP_PAD + hlRowY - pillH/2 + 0.5f);
+  // --- Measure bracket glyph once to size the highlight pill ---
+  listCanvas.setTextSize(2);
+  int16_t lbx,lby, xbx,xby, rbx,rby;
+  uint16_t lW,lH, xW,xH, rW,rH;
+  listCanvas.getTextBounds("[", 0, 0, &lbx, &lby, &lW, &lH);
+  listCanvas.getTextBounds("X", 0, 0, &xbx, &xby, &xW, &xH);
+  listCanvas.getTextBounds("]", 0, 0, &rbx, &rby, &rW, &rH);
+  int16_t cbh = lH; if (xH>cbh) cbh = xH; if (rH>cbh) cbh = rH;
+
+  // Selected row center
+  int16_t rowCenterY = (int16_t)(TOP_PAD + hlRowY + 0.5f);
+
+  // Bracket top relative to row center + tweaks, then expand by HIL_GAP both ways
+  int16_t brTop    = rowCenterY - cbh/2 + TEXT_Y_TWEAK + BRACKET_Y_TWEAK;
+  int16_t brBottom = brTop + cbh;
+
+  int16_t pillX = 4, pillW = W - 8;
+  int16_t pillY = brTop - (int16_t)HIL_GAP;
+  int16_t pillH = (brBottom - brTop) + 2*(int16_t)HIL_GAP;
+  
+  // Spacing between pill and bracket
+  const int8_t HIL_Y_NUDGE = -1; // try 1 or -1 if needed
+  pillY += HIL_Y_NUDGE;
+
+
+  // Clamp to canvas
   if (pillY < 1) pillY = 1;
   if (pillY + pillH > LIST_CANVAS_H - 1) pillY = LIST_CANVAS_H - 1 - pillH;
 
@@ -1225,7 +1246,6 @@ void serialService() {
       g_lineLen = 0;
     } else {
       if (g_lineLen < sizeof(g_lineBuf)-1) g_lineBuf[g_lineLen++] = c;
-
     }
   }
 }
