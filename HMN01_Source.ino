@@ -64,6 +64,19 @@
 
 
 // ---------- Display / Pins ----------
+//
+// ======= USER CONFIG (tweak here) =======
+// TFT pins should match your wiring (Nano ESP32 example below).
+// Backlight:
+//   - TFT_BL: set to your BL gate pin (you said D7)
+//   - BL_INVERT: 0 for non-inverting (direct LED or low-side NPN that brightens with higher duty)
+//                1 if your hardware acts inverted (higher duty = dimmer)
+//   - BL_FREQ:   1000 Hz works well with PN2222/BJTs; you can try 2000–4000 Hz too
+//   - BL_MIN/MAX_PCT: UI range (5..90 by request)
+//   - BL_GAMMA:  perceptual smoothing (2.2 is a good default; lower = more linear)
+//   - BL_USER_MIN/MAX: clamp the effective floor/ceiling to avoid full-off or overdrive
+// ========================================
+
 #define USE_HARDWARE_SPI 1
 #define SPI_SPEED_HZ     40000000  // 40 MHz
 
@@ -79,12 +92,12 @@
 
 // ---------- Backlight / brightness ----------
 #if MYDAY_ESP32
-  static const int BL_FREQ =  1000;  // 20 kHz (silent)
+  static const int BL_FREQ =  1000;  //  1 kHz (better for PN2222/BJT paths)
   static const int BL_BITS = 12;     // 0..4095
 #endif
 
 // If MOSFET path inverts (common: higher duty = dim), keep 1. If direct-LED PWM, set 0.
-#define BL_INVERT 0
+#define BL_INVERT 1
 
 static const uint8_t BL_MIN_PCT = 5;
 static const uint8_t BL_MAX_PCT = 90;
@@ -609,25 +622,8 @@ void rebuildHeader(bool force=false) {
   headerCanvas.setTextColor(COL_CLOCK, COL_BG);
   headerCanvas.print(nowStr);
 
-  // Brightness OSD (when changed or on boot load)
-  if ((int32_t)(g_blOsdUntil - millis()) > 0) {
-    char bltxt[12]; snprintf(bltxt, sizeof(bltxt), "BL %u%%", (unsigned)g_blPct);
-    int16_t bx, by; uint16_t bw2, bh2;
-    headerCanvas.getTextBounds(bltxt, 0, 0, &bx, &by, &bw2, &bh2);
-    int16_t padX=6, padY=4;
-    int16_t boxW = bw2 + padX*2;
-    int16_t boxH = bh2 + padY*2;
-    int16_t boxX = tx - 8 - boxW; if (boxX < MAINL) boxX = MAINL;
-    int16_t boxY = 2;
-    headerCanvas.fillRoundRect(boxX+1, boxY+2, boxW, boxH, 6, COL_SHADOW);
-    headerCanvas.fillRoundRect(boxX,   boxY,   boxW, boxH, 6, COL_MODAL_PANEL);
-    headerCanvas.drawRoundRect(boxX,   boxY,   boxW, boxH, 6, COL_BORDER);
-    headerCanvas.setCursor(boxX + padX, boxY + padY - by);
-    headerCanvas.setTextColor(COL_BLACK, COL_MODAL_PANEL);
-    headerCanvas.print(bltxt);
-  }
-
-  tft.drawRGBBitmap(0, 0, headerCanvas.getBuffer(), W, HEADER_HEIGHT);
+  // Brightness OSD moved to centered modal
+tft.drawRGBBitmap(0, 0, headerCanvas.getBuffer(), W, HEADER_HEIGHT);
 
   strncpy(lastTime, nowStr, sizeof(lastTime)); lastTime[sizeof(lastTime)-1] = '\0';
   lastMode = mode;
@@ -789,6 +785,95 @@ void drawRowContentToCanvas(uint8_t taskIndex, int16_t y, int fadeAlpha, uint16_
 }
 
 // ---------- List compose/flush ----------
+
+// ---------- Brightness modal (drawn on listCanvas to avoid flicker) ----------
+static void drawBrightnessModalOnListCanvas() {
+  // Compute segments based on clamped UI percent
+  uint8_t pct = g_blPct;
+  if (pct < BL_MIN_PCT) pct = BL_MIN_PCT;
+  if (pct > BL_MAX_PCT) pct = BL_MAX_PCT;
+  uint8_t segs = (uint8_t)((uint32_t)(pct - BL_MIN_PCT) * 10u / (uint32_t)(BL_MAX_PCT - BL_MIN_PCT)); // 0..10
+  if (segs > 10) segs = 10;
+  // Ensure at least one '=' so the bar never looks empty at minimum
+  if (segs == 0) segs = 1;
+
+  // Build the bar "[==========]" (no spaces inside)
+  char bar[20];
+  uint8_t i=0;
+  bar[i++]='[';
+  for (uint8_t k=0;k<segs;k++) bar[i++]='=';
+  for (uint8_t k=segs;k<10;k++) bar[i++]=' ';
+  bar[i++]=']';
+  bar[i]=' ';
+
+  const char* title = "Brightness";
+
+  // Use listCanvas metrics (same font size as UI: 2x)
+  listCanvas.setTextWrap(false);
+  listCanvas.setTextSize(2);
+
+  // Measure strings on canvas
+  int16_t x1,y1, xa,ya, xb,yb;
+  uint16_t wTitle,hTitle, wMinus,hMinus, wPlus,hPlus, wBar,hBar;
+  listCanvas.getTextBounds(title, 0, 0, &x1, &y1, &wTitle, &hTitle);
+  listCanvas.getTextBounds("-", 0, 0, &xa, &ya, &wMinus, &hMinus);
+  listCanvas.getTextBounds("+", 0, 0, &xb, &yb, &wPlus, &hPlus);
+  listCanvas.getTextBounds(bar, 0, 0, &xb, &yb, &wBar, &hBar);
+
+  const int16_t padX = 14, padY = 14, gapY = 12, gapX = 10;
+  int16_t rowW = (int16_t)wMinus + gapX + (int16_t)wBar + gapX + (int16_t)wPlus;
+  uint16_t contentW = (wTitle > rowW) ? wTitle : (uint16_t)rowW;
+
+  int16_t bw = (int16_t)contentW + padX*2;
+  if (bw > (W - 2*8)) bw = W - 2*8; // clamp
+  int16_t innerW = bw - padX*2;
+
+  int16_t usedGapX = gapX;
+  if (rowW > innerW) {
+    int16_t extra = rowW - innerW;
+    int16_t tryGap = gapX - extra/2;
+    if (tryGap < 6) tryGap = 6;
+    usedGapX = tryGap;
+    rowW = (int16_t)wMinus + usedGapX + (int16_t)wBar + usedGapX + (int16_t)wPlus;
+  }
+
+  uint16_t maxH = hBar;
+  if (hMinus > maxH) maxH = hMinus;
+  if (hPlus  > maxH) maxH = hPlus;
+
+  int16_t bh = (int16_t)hTitle + gapY + (int16_t)maxH + padY*2;
+  int16_t bx = (W - bw) / 2;                          // same W as screen
+  int16_t by = (LIST_CANVAS_H - bh) / 2;              // center within listCanvas
+
+  // Panel & shadow on the canvas
+  listCanvas.fillRoundRect(bx + 2, by + 3, bw, bh, 12, COL_SHADOW);
+  uint16_t COL_PANEL = COL_MOVE;
+  uint16_t COL_TXT   = COL_BLACK;
+  listCanvas.fillRoundRect(bx, by, bw, bh, 10, COL_PANEL);
+  listCanvas.drawRoundRect(bx, by, bw, bh, 10, COL_PANEL);
+
+  // Title
+  int16_t tx = bx + (bw - (int16_t)wTitle)/2;
+  int16_t ty = by + padY - y1;
+  listCanvas.setTextColor(COL_TXT, COL_PANEL);
+  listCanvas.setCursor(tx, ty);
+  listCanvas.print(title);
+
+  // Row "- [bar] +"
+  int16_t rowX = bx + (bw - rowW)/2;
+  int16_t rowY = ty + (int16_t)hTitle + gapY - ya;
+  listCanvas.setCursor(rowX, rowY);
+  listCanvas.print("-");
+
+  int16_t barX = rowX + (int16_t)wMinus + usedGapX;
+  listCanvas.setCursor(barX, rowY - (yb - ya));
+  listCanvas.print(bar);
+
+  int16_t plusX = barX + (int16_t)wBar + usedGapX;
+  listCanvas.setCursor(plusX, rowY - (yb - ya));
+  listCanvas.print("+");
+}
+
 void composeListFrame(float hlRowY) {
   listCanvas.fillRect(0, 0, W, LIST_CANVAS_H, COL_BG);
 
@@ -897,9 +982,15 @@ void composeListFrame(float hlRowY) {
   listCanvas.setCursor(tx + (int16_t)lw, ty); listCanvas.print(nums);
   listCanvas.setTextColor(COL_WHITE);
   listCanvas.setCursor(tx + (int16_t)lw + (int16_t)nw, ty); listCanvas.print(" ]");
-}
 
-inline void flushList() { tft.drawRGBBitmap(0, LIST_CANVAS_Y, listCanvas.getBuffer(), W, LIST_CANVAS_H); }
+  // Overlay brightness modal onto listCanvas (flicker-free)
+  if ((int32_t)(g_blOsdUntil - millis()) > 0 && mode != MODE_CONFIRM_DELETE && mode != MODE_READ) {
+    drawBrightnessModalOnListCanvas();
+  }
+}
+inline void flushList() {
+  tft.drawRGBBitmap(0, LIST_CANVAS_Y, listCanvas.getBuffer(), W, LIST_CANVAS_H);
+}
 void rebuildListStatic() { float hlRowY = (selected - topIndex + 0.5f) * ROW_HEIGHT; composeListFrame(hlRowY); flushList(); }
 
 // ---------- Anim ----------
@@ -1066,6 +1157,85 @@ void drawConfirmDelete() {
   int16_t rightX = rowX + (int16_t)wL + gap;
   tft.setCursor(rightX, rowY - (yb - ya)); tft.print(optR);
 }
+// ---------- Brightness modal (centered) ----------
+void drawBrightnessModal() {
+  const char* title = "Brightness";
+  uint8_t pct = g_blPct;
+  if (pct < BL_MIN_PCT) pct = BL_MIN_PCT;
+  if (pct > BL_MAX_PCT) pct = BL_MAX_PCT;
+  uint8_t segs = (uint8_t)((uint32_t)(pct - BL_MIN_PCT) * 10u / (uint32_t)(BL_MAX_PCT - BL_MIN_PCT)); // 0..10
+  if (segs > 10) segs = 10;
+
+  char bar[20];
+  uint8_t i=0;
+  bar[i++]='[';
+  for (uint8_t k=0;k<segs;k++) bar[i++]='=';
+  for (uint8_t k=segs;k<10;k++) bar[i++]=' ';
+  bar[i++]=']';
+  bar[i]=' ';
+
+  tft.setTextWrap(false);
+  tft.setTextSize(2);
+
+  int16_t x1,y1, xa,ya, xb,yb;
+  uint16_t wTitle,hTitle, wMinus,hMinus, wPlus,hPlus, wBar,hBar;
+
+  tft.getTextBounds(title, 0, 0, &x1, &y1, &wTitle, &hTitle);
+  tft.getTextBounds("-", 0, 0, &xa, &ya, &wMinus, &hMinus);
+  tft.getTextBounds("+", 0, 0, &xb, &yb, &wPlus, &hPlus);
+  tft.getTextBounds(bar, 0, 0, &xb, &yb, &wBar, &hBar);
+
+  const int16_t padX = 14, padY = 14, gapY = 12, gapX = 10;
+  int16_t rowW = (int16_t)wMinus + gapX + (int16_t)wBar + gapX + (int16_t)wPlus;
+  int16_t contentW = (wTitle > (uint16_t)rowW) ? (int16_t)wTitle : rowW;
+
+  int16_t bw = (contentW + padX*2);
+  if (bw > (W - 2*8)) bw = W - 2*8;
+  int16_t innerW = bw - padX*2;
+
+  int16_t usedGapX = gapX;
+  if (rowW > innerW) {
+    int16_t extra = rowW - innerW;
+    int16_t tryGap = gapX - extra/2;
+    if (tryGap < 6) tryGap = 6;
+    usedGapX = tryGap;
+    rowW = (int16_t)wMinus + usedGapX + (int16_t)wBar + usedGapX + (int16_t)wPlus;
+  }
+
+  uint16_t maxH = hBar;
+  if (hMinus > maxH) maxH = hMinus;
+  if (hPlus  > maxH) maxH = hPlus;
+  int16_t bh = (int16_t)hTitle + gapY + (int16_t)maxH + padY*2;
+
+  int16_t bx = (W - bw) / 2;
+  int16_t by = HEADER_HEIGHT + (LIST_CANVAS_H - bh) / 2;
+
+  tft.fillRoundRect(bx + 2, by + 3, bw, bh, 12, COL_SHADOW);
+  uint16_t COL_PANEL = COL_MOVE;
+  uint16_t COL_TXT   = COL_BLACK;
+  tft.fillRoundRect(bx, by, bw, bh, 10, COL_PANEL);
+  tft.drawRoundRect(bx, by, bw, bh, 10, COL_PANEL);
+
+  int16_t tx = bx + (bw - (int16_t)wTitle)/2;
+  int16_t ty = by + padY - y1;
+  tft.setTextColor(COL_TXT, COL_PANEL);
+  tft.setCursor(tx, ty);
+  tft.print(title);
+
+  int16_t rowX = bx + (bw - rowW)/2;
+  int16_t rowY = ty + (int16_t)hTitle + gapY - ya;
+  tft.setCursor(rowX, rowY);
+  tft.print("-");
+
+  int16_t barX = rowX + (int16_t)wMinus + usedGapX;
+  tft.setCursor(barX, rowY - (yb - ya));
+  tft.print(bar);
+
+  int16_t plusX = barX + (int16_t)wBar + usedGapX;
+  tft.setCursor(plusX, rowY - (yb - ya));
+  tft.print("+");
+}
+
 
 // ---------- Read modal ----------
 static void wrapTextToLines(const char* s, char out[][64], uint8_t &lines, uint8_t maxLines, uint8_t maxCharsPerLine) {
@@ -1362,13 +1532,15 @@ void loop() {
 
     // Brightness while in MOVE
     if (Btn::pressed(bLeft) || Btn::repeat(bLeft)) {
-      if (g_blPct > BL_MIN_PCT) setBacklightPct(g_blPct - BL_STEP, true);
-      rebuildHeader(true);
-    }
+if (g_blPct > BL_MIN_PCT) setBacklightPct(g_blPct - BL_STEP, true);
+  rebuildHeader(true);
+  rebuildListStatic();
+}
     if (Btn::pressed(bRight) || Btn::repeat(bRight)) {
-      if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
-      rebuildHeader(true);
-    }
+if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
+  rebuildHeader(true);
+  rebuildListStatic();
+}
   } else if (mode == MODE_CONFIRM_DELETE) {
     bool gateOpen = ( (int32_t)(now - confirmIgnoreUntil) >= 0 ) && !bUp.debPressed && !bDown.debPressed && !bOk.debPressed && !bLeft.debPressed && !bRight.debPressed;
     if (gateOpen) {
