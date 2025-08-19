@@ -222,6 +222,7 @@ uint16_t COL_FOOT, COL_BLACK, COL_MODAL_PANEL, COL_MOVE, COL_HIL, COL_WHITE, COL
 uint16_t COL_PRI_HIGH, COL_PRI_MED, COL_CLOCK, COL_SHADOW;
 uint16_t COL_NAV_BAR;
 uint16_t COL_NAV_ICON0, COL_NAV_ICON1, COL_NAV_ICON2, COL_NAV_ICON3, COL_ICON_GREY;
+uint16_t COL_BOLT;
 
 // ---------- Tasks & Persistence ----------
 enum PendState  : uint8_t { PEND_NONE=0, PEND_WAIT=1, PEND_FADE=2 };
@@ -536,8 +537,8 @@ static inline uint16_t lerp565(uint16_t fg, uint16_t bg, uint8_t a) {
 
 // ---------- Pixel-art nav icons (15x15, '.' off, 'X' on) ----------
 // 5x5 masks scaled to 15x15 (3px blocks) for an 8-bit look
-// Replaced first icon with an 8-bit heart (frame A)
-static const char ICON_HEART_5_A[5][6] PROGMEM = {
+// 8-bit heart (single frame)
+static const char ICON_HEART_5[5][6] PROGMEM = {
   ".X.X.",
   "XXXXX",
   "XXXXX",
@@ -545,17 +546,8 @@ static const char ICON_HEART_5_A[5][6] PROGMEM = {
   "..X.."
 };
 
-// Heart (frame B): slightly larger middle to "beat"
-static const char ICON_HEART_5_B[5][6] PROGMEM = {
-  "XXXXX",
-  "XXXXX",
-  "XXXXX",
-  ".XXX.",
-  "..X.."
-};
-
-// Microchip (frame A)
-static const char ICON_CHIP_5_A[5][6] PROGMEM = {
+// Microchip (single frame)
+static const char ICON_CHIP_5[5][6] PROGMEM = {
   "XXXXX",
   "X...X",
   "X.X.X",
@@ -563,17 +555,8 @@ static const char ICON_CHIP_5_A[5][6] PROGMEM = {
   "XXXXX"
 };
 
-// Microchip (frame B): blink center trace
-static const char ICON_CHIP_5_B[5][6] PROGMEM = {
-  "XXXXX",
-  "X...X",
-  "X...X",
-  "X.X.X",
-  "XXXXX"
-};
-
-// Target (frame A)
-static const char ICON_TARGET_5_A[5][6] PROGMEM = {
+// Target (single frame)
+static const char ICON_TARGET_5[5][6] PROGMEM = {
   ".XXX.",
   "X...X",
   "X.X.X",
@@ -581,40 +564,21 @@ static const char ICON_TARGET_5_A[5][6] PROGMEM = {
   ".XXX."
 };
 
-// Target (frame B): flashing center
-static const char ICON_TARGET_5_B[5][6] PROGMEM = {
-  ".XXX.",
-  "X...X",
-  "X...X",
-  "X...X",
-  ".XXX."
-};
-
-// Skull (frame A)
-static const char ICON_SKULL_5_A[5][6] PROGMEM = {
+// Skull (single frame)
+static const char ICON_SKULL_5[5][6] PROGMEM = {
   ".XXX.",
   "X.X.X",
   "XXXXX",
   ".X.X.",
   ".X.X."
 };
-
-// Skull (frame B): eyes "blink"
-static const char ICON_SKULL_5_B[5][6] PROGMEM = {
-  ".XXX.",
-  "X...X",
-  "XXXXX",
-  ".X.X.",
-  ".X.X."
-};
-
-static void drawIcon15(Adafruit_GFX &canvas, int16_t left, int16_t top, uint8_t which, uint16_t color, bool altFrame) {
+static void drawIcon15(Adafruit_GFX &canvas, int16_t left, int16_t top, uint8_t which, uint16_t color) {
   const char (*icon)[6];
   switch (which) {
-    case 0: icon = altFrame ? ICON_HEART_5_B  : ICON_HEART_5_A;  break;
-    case 1: icon = altFrame ? ICON_CHIP_5_B   : ICON_CHIP_5_A;   break;
-    case 2: icon = altFrame ? ICON_TARGET_5_B : ICON_TARGET_5_A; break;
-    default: icon = altFrame ? ICON_SKULL_5_B : ICON_SKULL_5_A;  break;
+    case 0: icon = ICON_HEART_5;  break;
+    case 1: icon = ICON_CHIP_5;   break;
+    case 2: icon = ICON_TARGET_5; break;
+    default: icon = ICON_SKULL_5; break;
   }
   const uint8_t cell = 3; // 3x3 blocks -> 15x15
   for (uint8_t y=0; y<5; ++y) {
@@ -648,12 +612,14 @@ static inline void blit565_matte_subrect(Adafruit_GFX &gfx, int16_t dx, int16_t 
 
 // ---------- Header ----------
 static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
-  // Background rounded bar spanning the full screen height (clipped by canvas)
-  canvas.fillRoundRect(NAV_PAD, NAV_PAD - canvasTopGlobalY, NAV_WIDTH, NAV_HEIGHT, NAV_RADIUS, COL_NAV_BAR);
+  // No nav panel fill — minimalist icons only
 
   // Icon geometry (15x15 pixel-art icons)
   const int16_t iconSize = 15;
-  int16_t centerX = NAV_PAD + NAV_WIDTH/2;
+  // Shift divider 4px left, so use an effective nav span for centering icons
+  int16_t effectiveNavW = NAV_WIDTH - 4;
+  if (effectiveNavW < iconSize) effectiveNavW = iconSize; // guard
+  int16_t centerX = NAV_PAD + effectiveNavW/2;
   uint32_t nowMs = millis();
 
   // Even spacing between icons and nav edges: NAV_HEIGHT = N*h + (N+1)*gap
@@ -676,7 +642,27 @@ static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
     uint16_t iconColor = (i == navIndex) ? (i==0?COL_NAV_ICON0:i==1?COL_NAV_ICON1:i==2?COL_NAV_ICON2:COL_NAV_ICON3) : COL_ICON_GREY;
     drawIcon15(canvas, left, drawY, i, iconColor);
 
-    // Removed square border pulse as requested
+    // No border or effects
+  }
+
+  // Simple white line divider: continuous 3px line across full nav height
+  int16_t xDiv = (NAV_PAD + NAV_WIDTH + NAV_PAD - 1) - 4; // base x for divider
+  int16_t yG0 = NAV_PAD;
+  int16_t yG1 = NAV_PAD + NAV_HEIGHT;
+  int16_t y0 = i16max(yG0, canvasTopGlobalY);
+  int16_t y1 = i16min(yG1, canvasTopGlobalY + canvas.height());
+  int16_t len = y1 - y0;
+  if (len > 0) {
+    uint16_t col = COL_WHITE;
+    int16_t s = i16max(y0, NAV_PAD);
+    int16_t e = i16min(y1, NAV_PAD + NAV_HEIGHT);
+    if (e > s) {
+      int16_t yLocal = s - canvasTopGlobalY;
+      int16_t h = e - s;
+      canvas.drawFastVLine(xDiv - 1, yLocal, h, col);
+      canvas.drawFastVLine(xDiv + 0, yLocal, h, col);
+      canvas.drawFastVLine(xDiv + 1, yLocal, h, col);
+    }
   }
 }
 void rebuildHeader(bool force=false) {
@@ -698,7 +684,7 @@ void rebuildHeader(bool force=false) {
 
   headerCanvas.fillRect(0,0,W,HEADER_HEIGHT, COL_BG);
 
-  // Draw NAV bar + icons (clipped by header canvas)
+  // Draw icons + divider (no nav panel)
   drawNavOnCanvas(headerCanvas, /*canvasTopGlobalY=*/0);
 
   // MAIN_LEFT reference
@@ -707,7 +693,8 @@ void rebuildHeader(bool force=false) {
   // Header label
   headerCanvas.setTextWrap(false);
   headerCanvas.setTextSize(2);
-  headerCanvas.setCursor(MAINL - 2, HEADER_Y_PAD);
+  // Align left bracket with list brackets
+  headerCanvas.setCursor(MAINL + BRACKET_X_TWEAK, HEADER_Y_PAD);
   if (mode == MODE_MOVE) {
     headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
     headerCanvas.setTextColor(COL_MOVE,  COL_BG); headerCanvas.print("Move");
@@ -997,7 +984,7 @@ static void drawBrightnessModalOnListCanvas() {
 void composeListFrame(float hlRowY) {
   listCanvas.fillRect(0, 0, W, LIST_CANVAS_H, COL_BG);
 
-  // Draw NAV bar + icons on list canvas
+  // Draw icons + divider on list canvas
   drawNavOnCanvas(listCanvas, /*canvasTopGlobalY=*/HEADER_HEIGHT);
 
   // MAIN_LEFT
@@ -1595,6 +1582,7 @@ void setup() {
   COL_NAV_ICON2  = tft.color565(0xEE, 0xD4, 0x9F); // #eed49f
   COL_NAV_ICON3  = tft.color565(0xF5, 0xBD, 0xE6); // #f5bde6
   COL_ICON_GREY  = tft.color565(0x83, 0x8B, 0xA7); // grey
+  COL_BOLT       = tft.color565(0x8A, 0xAD, 0xF4); // bolt heads (blue)
 
   tft.fillScreen(COL_BG);
   COL_SHADOW = fade565(COL_BLACK, COL_BG, 80);
