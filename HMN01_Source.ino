@@ -1,4 +1,4 @@
-// ========== My Day (Nano ESP32 / ST7789 320x170 + 5-way stick + NAV Home + PWM Backlight) ==========
+/// ========== My Day (Nano ESP32 / ST7789 320x170 + 5-way stick + NAV Home + PWM Backlight) ==========
 // Buttons to GND (internal pullups): A4=UP, A3=OK, A2=DOWN, A5=LEFT, A6=RIGHT
 // OK: single toggle, double enter/exit MOVE, triple delete->confirm
 //
@@ -170,7 +170,7 @@ const uint8_t FOOTER_BOTTOM_PAD = 0;
 
 // ---- Left navigation geometry ----
 static const int16_t NAV_PAD = 2; // 2px on all sides
-static const int16_t NAV_WIDTH = 31; // fixed width for the left nav bar (thinner by 5px)
+static const int16_t NAV_WIDTH = 32; // panel width (32x170)
 static const int16_t NAV_HEIGHT = H - 2 * NAV_PAD; // height within top/bottom padding
 static const int16_t NAV_RADIUS = 6; // less rounded corners
 static inline int16_t MAIN_LEFT() { return NAV_PAD + (int16_t)NAV_WIDTH + NAV_PAD + 3; }
@@ -269,6 +269,11 @@ uint32_t inputSquelchUntil  = 0;
 // ---------- Nav mode ----------
 uint8_t navIndex = 0; // 0..3
 uint8_t g_leftClicks = 0; uint32_t g_leftLastClickMs = 0;
+// Nav scrolling (window of 4 visible icons over total)
+static const uint8_t NAV_VISIBLE = 4;
+static const uint8_t NAV_TOTAL   = 5; // 4 icons + battery
+uint8_t navScrollTop = 0; // first visible index
+uint8_t batteryPct = 100; // placeholder battery percent
 
 // ---------- Pending animation ----------
 const uint16_t PENDING_DELAY_MS = 2000;
@@ -612,19 +617,46 @@ static inline void blit565_matte_subrect(Adafruit_GFX &gfx, int16_t dx, int16_t 
 
 // ---------- Header ----------
 static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
-  // No nav panel fill — minimalist icons only
+  // Panel region
+  int16_t panelX = NAV_PAD;
+  int16_t panelY = NAV_PAD - canvasTopGlobalY;
+  int16_t panelW = NAV_WIDTH;
+  int16_t panelH = NAV_HEIGHT;
+  // Clip Y
+  int16_t visY0 = 0;
+  int16_t visY1 = canvas.height();
+  int16_t drawY0 = i16max(panelY, visY0);
+  int16_t drawY1 = i16min(panelY + panelH, visY1);
+  if (drawY1 > drawY0) {
+    // Draw the 32x170 navigation panel with rounded corners without mid-slice arcs
+    const int16_t r = 10;
+    int16_t sliceH = drawY1 - drawY0;
+    bool isTop    = (drawY0 == panelY);
+    bool isBottom = (drawY1 == panelY + panelH);
+
+    // Base fill for this slice
+    canvas.fillRect(panelX, drawY0, panelW, sliceH, COL_NAV_BAR);
+
+    // Add rounded corners only where needed
+    if (isTop) {
+      int16_t h = (2*r < sliceH) ? (2*r) : sliceH;
+      if (h > 0) canvas.fillRoundRect(panelX, drawY0, panelW, h, r, COL_NAV_BAR);
+    }
+    if (isBottom) {
+      int16_t h = (2*r < sliceH) ? (2*r) : sliceH;
+      if (h > 0) canvas.fillRoundRect(panelX, drawY1 - h, panelW, h, r, COL_NAV_BAR);
+    }
+  }
 
   // Icon geometry (15x15 pixel-art icons)
   const int16_t iconSize = 15;
-  // Shift divider 4px left, so use an effective nav span for centering icons
-  int16_t effectiveNavW = NAV_WIDTH - 4;
-  if (effectiveNavW < iconSize) effectiveNavW = iconSize; // guard
-  int16_t centerX = NAV_PAD + effectiveNavW/2;
+  // Center icons within full panel width
+  int16_t centerX = NAV_PAD + NAV_WIDTH/2;
   uint32_t nowMs = millis();
 
   // Even spacing between icons and nav edges: NAV_HEIGHT = N*h + (N+1)*gap
-  const int16_t numIcons = 4;
-  int16_t totalIconsH = numIcons * iconSize;
+  const int16_t numIcons = NAV_VISIBLE;
+  int16_t totalIconsH = NAV_VISIBLE * iconSize;
   int16_t available = NAV_HEIGHT - totalIconsH;
   if (available < 0) available = 0;
   const int16_t gapCount = numIcons + 1; // top + between + bottom
@@ -633,37 +665,96 @@ static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
   int16_t startOffset = remainder / 2; // center leftover
   int16_t top0Global = NAV_PAD + gap + startOffset;
 
-  for (uint8_t i=0; i<4; ++i) {
-    int16_t topGlobal = top0Global + i * (iconSize + gap);
+  for (uint8_t vis=0; vis<NAV_VISIBLE; ++vis) {
+    uint8_t i = navScrollTop + vis;
+    int16_t topGlobal = top0Global + vis * (iconSize + gap);
     int16_t left = centerX - iconSize/2;
     int16_t drawY = topGlobal - canvasTopGlobalY;
     if (drawY + iconSize < 0 || drawY >= canvas.height()) continue;
 
-    uint16_t iconColor = (i == navIndex) ? (i==0?COL_NAV_ICON0:i==1?COL_NAV_ICON1:i==2?COL_NAV_ICON2:COL_NAV_ICON3) : COL_ICON_GREY;
-    drawIcon15(canvas, left, drawY, i, iconColor);
-
-    // No border or effects
-  }
-
-  // Simple white line divider: continuous 3px line across full nav height
-  int16_t xDiv = (NAV_PAD + NAV_WIDTH + NAV_PAD - 1) - 4; // base x for divider
-  int16_t yG0 = NAV_PAD;
-  int16_t yG1 = NAV_PAD + NAV_HEIGHT;
-  int16_t y0 = i16max(yG0, canvasTopGlobalY);
-  int16_t y1 = i16min(yG1, canvasTopGlobalY + canvas.height());
-  int16_t len = y1 - y0;
-  if (len > 0) {
-    uint16_t col = COL_WHITE;
-    int16_t s = i16max(y0, NAV_PAD);
-    int16_t e = i16min(y1, NAV_PAD + NAV_HEIGHT);
-    if (e > s) {
-      int16_t yLocal = s - canvasTopGlobalY;
-      int16_t h = e - s;
-      canvas.drawFastVLine(xDiv - 1, yLocal, h, col);
-      canvas.drawFastVLine(xDiv + 0, yLocal, h, col);
-      canvas.drawFastVLine(xDiv + 1, yLocal, h, col);
+    uint16_t iconColor = (i == navIndex)
+      ? (i==0?COL_NAV_ICON0 : i==1?COL_NAV_ICON1 : i==2?COL_NAV_ICON2 : i==3?COL_NAV_ICON3 : COL_NAV_ICON0)
+      : COL_ICON_GREY;
+    if (i < 4) {
+      drawIcon15(canvas, left, drawY, i, iconColor);
+    } else {
+      // Placeholder icon (8-bit diamond) using color #eebebe
+      uint16_t colPH = tft.color565(0xEE, 0xBE, 0xBE);
+      // 5x5 diamond mask centered within 15x15, using 3x3 blocks to match other icons
+      static const uint8_t DIAMOND[5][5] = {
+        {0,0,1,0,0},
+        {0,1,1,1,0},
+        {1,1,1,1,1},
+        {0,1,1,1,0},
+        {0,0,1,0,0}
+      };
+      for (uint8_t ry=0; ry<5; ++ry) {
+        for (uint8_t rx=0; rx<5; ++rx) {
+          if (DIAMOND[ry][rx]) canvas.fillRect(left + rx*3, drawY + ry*3, 3, 3, colPH);
+        }
+      }
     }
   }
+
+  // 8-bit triangle scroll indicators (blocky, symmetric)
+  bool canScrollUp = (navScrollTop > 0);
+  bool canScrollDown = (navScrollTop + NAV_VISIBLE < NAV_TOTAL);
+  int16_t cx = centerX;
+  const int16_t arrowH = 7;  // rows
+  const int16_t arrowW = 11; // base width
+  // Compute slice and icon bounds in this canvas
+  int16_t sliceTop = drawY0;
+  int16_t sliceBot = drawY1;
+  int16_t topOfIconLocal = top0Global - canvasTopGlobalY;
+  int16_t bottomOfIconLocal = top0Global + (NAV_VISIBLE - 1) * (iconSize + gap) + iconSize - canvasTopGlobalY;
+
+  // Arrow color (#babbf1)
+  uint16_t ARROW_COL = tft.color565(0xBA, 0xBB, 0xF1);
+
+  // Only draw top arrow in header slice; bottom arrow in list slice to avoid duplicates
+  bool isHeaderSlice = (canvasTopGlobalY == 0);
+  bool isListSlice   = (canvasTopGlobalY == HEADER_HEIGHT);
+
+  if (canScrollUp && isHeaderSlice) {
+    int16_t topSpan = topOfIconLocal - sliceTop;
+    int16_t pad = (topSpan > arrowH) ? (topSpan - arrowH) / 2 : 1;
+    pad += 5; // extra spacing from icon
+    if (pad > 10) pad = 10; // up to +10px extra spacing
+    int16_t baseY = topOfIconLocal - pad; // widest row closest to icon
+    // Up arrow: draw from base upward decreasing width, 2px-thick rows
+    for (int8_t r = 0; r < arrowH; ++r) {
+      int16_t w = arrowW - 2 * r; // 11,9,7,5,3,1
+      if (w < 1) break;
+      int16_t y = baseY - r;
+      int16_t half = (w - 1) / 2;
+      int16_t x0 = cx - half;
+      if (y >= sliceTop && y < sliceBot) {
+        canvas.drawFastHLine(x0, y, w, ARROW_COL);
+        if (y - 1 >= sliceTop) canvas.drawFastHLine(x0, y - 1, w, ARROW_COL); // blockier row without bleeding above slice
+      }
+    }
+  }
+  if (canScrollDown && isListSlice) {
+    int16_t bottomSpan = sliceBot - bottomOfIconLocal;
+    int16_t pad = (bottomSpan > arrowH) ? (bottomSpan - arrowH) / 2 : 1;
+    pad += 5; // extra spacing from icon
+    if (pad > 10) pad = 10; // up to +10px extra spacing
+    int16_t tipY = bottomOfIconLocal + pad; // tip (narrowest row)
+    // Down arrow: symmetric, 2px-thick rows
+    for (int8_t r = 0; r < arrowH; ++r) {
+      int16_t w = arrowW - 2 * r; // 11,9,7,5,3,1...
+      if (w < 1) break;
+      int16_t y = tipY + r;
+      int16_t half = (w - 1) / 2;
+      int16_t x0 = cx - half;
+      if (y >= 0 && y < canvas.height()) {
+        canvas.drawFastHLine(x0, y, w, ARROW_COL);
+        if (y + 1 < canvas.height()) canvas.drawFastHLine(x0, y + 1, w, ARROW_COL);
+      }
+    }
+  }
+  
+  // Only icons and the 3px divider
 }
 void rebuildHeader(bool force=false) {
   static char lastTime[12] = "";
@@ -1575,7 +1666,7 @@ void setup() {
   COL_PRI_HIGH   = tft.color565(0xE7, 0x82, 0x84);
   COL_PRI_MED    = tft.color565(0xEF, 0x9F, 0x76);
   COL_CLOCK      = tft.color565(0x89, 0xDC, 0xEB);
-  COL_NAV_BAR    = COL_TEXT; // match task font color
+  COL_NAV_BAR    = tft.color565(0x5A, 0x66, 0xA6); // lighter variant of panel color
   // Nav icon palette: active colors as requested, with grey for inactive
   COL_NAV_ICON0  = tft.color565(0xA6, 0xDA, 0x95); // #a6da95
   COL_NAV_ICON1  = tft.color565(0x8A, 0xAD, 0xF4); // #8aadf4
@@ -1663,8 +1754,16 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
     }
   } else if (mode == MODE_NAV && inputsReady) {
     // Navigate between 4 icons using UP/DOWN; exit with double LEFT again or single RIGHT
-    if (Btn::released(bUp)   && Btn::lastPressDurationMs(bUp)   < HOLD_START_MS) { if (navIndex > 0) navIndex--; rebuildHeader(true); rebuildListStatic(); }
-    if (Btn::released(bDown) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) { if (navIndex < 3) navIndex++; rebuildHeader(true); rebuildListStatic(); }
+    if (Btn::released(bUp)   && Btn::lastPressDurationMs(bUp)   < HOLD_START_MS) {
+      if (navIndex > 0) navIndex--;
+      if (navIndex < navScrollTop) navScrollTop = navIndex;
+      rebuildHeader(true); rebuildListStatic();
+    }
+    if (Btn::released(bDown) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) {
+      if (navIndex + 1 < NAV_TOTAL) navIndex++;
+      if (navIndex >= navScrollTop + NAV_VISIBLE) navScrollTop = navIndex - NAV_VISIBLE + 1;
+      rebuildHeader(true); rebuildListStatic();
+    }
     if (Btn::clicked(bRight)) { mode = MODE_NORMAL; rebuildHeader(true); rebuildListStatic(); }
   } else if (mode == MODE_NORMAL && inputsReady) {
     // Enter priority editor with LEFT/RIGHT holds
