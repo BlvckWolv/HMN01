@@ -18,16 +18,8 @@
 #include <pgmspace.h>
 
 #include "BG_COL.h"      // BG_COLOR565 from your PNG color
-#include "NAV_HOME.h"    // NAV_HOME_WIDTH, NAV_HOME_HEIGHT, NAV_HOME_BITMAP[], NAV_HOME_A[]
 
-// ---- Map NAV_HOME_* to generic NAV_* names (so we don't depend on old LNAV symbols) ----
-#ifndef NAV_HOME_WIDTH
-  #error "NAV_HOME.h must define NAV_HOME_WIDTH, NAV_HOME_HEIGHT, NAV_HOME_BITMAP, NAV_HOME_A"
-#endif
-#define NAV_WIDTH   NAV_HOME_WIDTH
-#define NAV_HEIGHT  NAV_HOME_HEIGHT
-#define NAV_BITMAP  NAV_HOME_BITMAP
-#define NAV_A       NAV_HOME_A
+// NAV_HOME removed: we now render a simple solid-color vertical navigation bar on the left
 
 // ----------- Core gating -----------
 #if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
@@ -178,6 +170,9 @@ const uint8_t FOOTER_BOTTOM_PAD = 0;
 
 // ---- Left navigation geometry ----
 static const int16_t NAV_PAD = 2; // 2px on all sides
+static const int16_t NAV_WIDTH = 36; // fixed width for the left nav bar
+static const int16_t NAV_HEIGHT = H - 2 * NAV_PAD; // height within top/bottom padding
+static const int16_t NAV_RADIUS = 6; // rounded corner radius (slightly less)
 static inline int16_t MAIN_LEFT() { return NAV_PAD + (int16_t)NAV_WIDTH + NAV_PAD; }
 
 // ---------- Buttons ----------
@@ -225,6 +220,8 @@ const int8_t  RIGHT_TWEAK_PX = 4;
 uint16_t COL_BG, COL_TEXT, COL_DIM, COL_ACCENT, COL_FRAME, COL_BORDER;
 uint16_t COL_FOOT, COL_BLACK, COL_MODAL_PANEL, COL_MOVE, COL_HIL, COL_WHITE, COL_X_HARD;
 uint16_t COL_PRI_HIGH, COL_PRI_MED, COL_CLOCK, COL_SHADOW;
+uint16_t COL_NAV_BAR;
+uint16_t COL_NAV_ICON0, COL_NAV_ICON1, COL_NAV_ICON2, COL_NAV_ICON3, COL_ICON_GREY;
 
 // ---------- Tasks & Persistence ----------
 enum PendState  : uint8_t { PEND_NONE=0, PEND_WAIT=1, PEND_FADE=2 };
@@ -246,7 +243,7 @@ uint8_t  taskCount = 0;
 uint32_t nextUid = 1;
 
 // ---------- Modes ----------
-enum Mode : uint8_t { MODE_NORMAL=0, MODE_MOVE=1, MODE_CONFIRM_DELETE=2, MODE_READ=3, MODE_PRIO_EDIT=4 };
+enum Mode : uint8_t { MODE_NORMAL=0, MODE_MOVE=1, MODE_CONFIRM_DELETE=2, MODE_READ=3, MODE_PRIO_EDIT=4, MODE_NAV=5 };
 Mode mode = MODE_NORMAL;
 int8_t   prioEditDir = 0;
 uint32_t g_prioNextBumpMs = 0;
@@ -267,6 +264,10 @@ GFXcanvas16 listCanvas(W, LIST_CANVAS_H);
 uint32_t confirmIgnoreUntil = 0;
 uint32_t confirmDeleteUid   = 0;
 uint32_t inputSquelchUntil  = 0;
+
+// ---------- Nav mode ----------
+uint8_t navIndex = 0; // 0..3
+uint8_t g_leftClicks = 0; uint32_t g_leftLastClickMs = 0;
 
 // ---------- Pending animation ----------
 const uint16_t PENDING_DELAY_MS = 2000;
@@ -553,6 +554,53 @@ static inline void blit565_matte_subrect(Adafruit_GFX &gfx, int16_t dx, int16_t 
 }
 
 // ---------- Header ----------
+static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
+  // Background rounded bar spanning the full screen height (clipped by canvas)
+  canvas.fillRoundRect(NAV_PAD, NAV_PAD - canvasTopGlobalY, NAV_WIDTH, NAV_HEIGHT, NAV_RADIUS, COL_NAV_BAR);
+
+  // Icon geometry
+  const int16_t iconSize = 15;
+  const int16_t iconRadius = 7;
+  int16_t centerX = NAV_PAD + NAV_WIDTH/2;
+  uint32_t nowMs = millis();
+
+  // Even spacing between icons and nav edges: NAV_HEIGHT = N*h + (N+1)*gap
+  const int16_t numIcons = 4;
+  int16_t totalIconsH = numIcons * iconSize;
+  int16_t available = NAV_HEIGHT - totalIconsH;
+  if (available < 0) available = 0;
+  const int16_t gapCount = numIcons + 1; // top + between + bottom
+  int16_t gap = available / gapCount;
+  int16_t remainder = available - gap * gapCount;
+  int16_t startOffset = remainder / 2; // center leftover
+  int16_t top0Global = NAV_PAD + gap + startOffset;
+
+  for (uint8_t i=0; i<4; ++i) {
+    int16_t topGlobal = top0Global + i * (iconSize + gap);
+    int16_t left = centerX - iconSize/2;
+    int16_t drawY = topGlobal - canvasTopGlobalY;
+    if (drawY + iconSize < 0 || drawY >= canvas.height()) continue;
+
+    uint16_t baseColor = COL_ICON_GREY;
+    if (i == navIndex) {
+      switch(i) {
+        case 0: baseColor = COL_NAV_ICON0; break;
+        case 1: baseColor = COL_NAV_ICON1; break;
+        case 2: baseColor = COL_NAV_ICON2; break;
+        case 3: baseColor = COL_NAV_ICON3; break;
+      }
+    }
+    canvas.fillRoundRect(left, drawY, iconSize, iconSize, iconRadius, baseColor);
+
+    if (i == navIndex && mode == MODE_NAV) {
+      // Pulse border around the selected square
+      uint8_t a = (uint8_t)((sinf((nowMs % 1000) * 0.006283185f) * 0.5f + 0.5f) * 120.0f) + 60;
+      uint16_t pulseCol = fade565(baseColor, COL_NAV_BAR, a);
+      canvas.drawRoundRect(left - 2, drawY - 2, iconSize + 4, iconSize + 4, iconRadius + 2, pulseCol);
+      canvas.drawRoundRect(left - 1, drawY - 1, iconSize + 2, iconSize + 2, iconRadius + 1, pulseCol);
+    }
+  }
+}
 void rebuildHeader(bool force=false) {
   static char lastTime[12] = "";
   static Mode lastMode = MODE_NORMAL;
@@ -572,18 +620,8 @@ void rebuildHeader(bool force=false) {
 
   headerCanvas.fillRect(0,0,W,HEADER_HEIGHT, COL_BG);
 
-  // Draw NAV slice overlapping header (2px pad)
-  int16_t navTopGlobal = NAV_PAD;
-  int16_t headerTop = 0;
-  int16_t headerBottom = HEADER_HEIGHT;
-  int16_t overlapY0 = i16max(navTopGlobal, headerTop);
-  int16_t overlapY1 = i16min(navTopGlobal + (int16_t)NAV_HEIGHT, headerBottom);
-  if (overlapY1 > overlapY0) {
-    uint16_t sy = overlapY0 - navTopGlobal;
-    uint16_t blitH = overlapY1 - overlapY0;
-    blit565_matte_subrect(headerCanvas, NAV_PAD, overlapY0, NAV_BITMAP, NAV_A,
-                          NAV_WIDTH, NAV_HEIGHT, 0, sy, NAV_WIDTH, blitH, COL_BG);
-  }
+  // Draw NAV bar + icons (clipped by header canvas)
+  drawNavOnCanvas(headerCanvas, /*canvasTopGlobalY=*/0);
 
   // MAIN_LEFT reference
   int16_t MAINL = MAIN_LEFT();
@@ -607,6 +645,10 @@ void rebuildHeader(bool force=false) {
   } else if (mode == MODE_PRIO_EDIT) {
     headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
     headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print("Prio");
+    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
+  } else if (mode == MODE_NAV) {
+    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
+    headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print("Nav");
     headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
   } else {
     headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
@@ -877,19 +919,8 @@ static void drawBrightnessModalOnListCanvas() {
 void composeListFrame(float hlRowY) {
   listCanvas.fillRect(0, 0, W, LIST_CANVAS_H, COL_BG);
 
-  // NAV slice overlapping list area
-  int16_t navTopGlobal = NAV_PAD;
-  int16_t listTop    = HEADER_HEIGHT;
-  int16_t listBottom = HEADER_HEIGHT + LIST_CANVAS_H;
-  int16_t overlapY0 = i16max(navTopGlobal, listTop);
-  int16_t overlapY1 = i16min(navTopGlobal + (int16_t)NAV_HEIGHT, listBottom);
-  if (overlapY1 > overlapY0) {
-    uint16_t sy = overlapY0 - navTopGlobal;
-    uint16_t blitH = overlapY1 - overlapY0;
-    int16_t dy = overlapY0 - listTop;
-    blit565_matte_subrect(listCanvas, NAV_PAD, dy, NAV_BITMAP, NAV_A,
-                          NAV_WIDTH, NAV_HEIGHT, 0, sy, NAV_WIDTH, blitH, COL_BG);
-  }
+  // Draw NAV bar + icons on list canvas
+  drawNavOnCanvas(listCanvas, /*canvasTopGlobalY=*/HEADER_HEIGHT);
 
   // MAIN_LEFT
   int16_t MAINL = MAIN_LEFT();
@@ -1479,6 +1510,13 @@ void setup() {
   COL_PRI_HIGH   = tft.color565(0xE7, 0x82, 0x84);
   COL_PRI_MED    = tft.color565(0xEF, 0x9F, 0x76);
   COL_CLOCK      = tft.color565(0x89, 0xDC, 0xEB);
+  COL_NAV_BAR    = tft.color565(0x8A, 0x8D, 0xD1); // lighter variant of #696bae
+  // Nav icon palette: active colors as requested, with grey for inactive
+  COL_NAV_ICON0  = tft.color565(0xA6, 0xDA, 0x95); // #a6da95
+  COL_NAV_ICON1  = tft.color565(0x8A, 0xAD, 0xF4); // #8aadf4
+  COL_NAV_ICON2  = tft.color565(0xEE, 0xD4, 0x9F); // #eed49f
+  COL_NAV_ICON3  = tft.color565(0xF5, 0xBD, 0xE6); // #f5bde6
+  COL_ICON_GREY  = tft.color565(0x83, 0x8B, 0xA7); // grey
 
   tft.fillScreen(COL_BG);
   COL_SHADOW = fade565(COL_BLACK, COL_BG, 80);
@@ -1495,7 +1533,7 @@ void setup() {
   loadUIState();
 
   applyBacklight();              // apply loaded brightness
-  g_blOsdUntil = millis() + 1200; // show OSD briefly on boot
+  g_blOsdUntil = 0;              // do not show OSD on boot
 
   mode = MODE_NORMAL;
   sortTasksByPriorityKeepSelection();
@@ -1557,6 +1595,11 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
       if (!bLeft.debPressed) { exitPrioEdit(); }
       else if ((int32_t)(now - g_prioNextBumpMs) >= 0) { bumpPriorityAt(selected, -1); g_prioNextBumpMs = now + PRIO_REPEAT_MS; }
     }
+  } else if (mode == MODE_NAV && inputsReady) {
+    // Navigate between 4 icons using UP/DOWN; exit with double LEFT again or single RIGHT
+    if (Btn::released(bUp)   && Btn::lastPressDurationMs(bUp)   < HOLD_START_MS) { if (navIndex > 0) navIndex--; rebuildHeader(true); rebuildListStatic(); }
+    if (Btn::released(bDown) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) { if (navIndex < 3) navIndex++; rebuildHeader(true); rebuildListStatic(); }
+    if (Btn::clicked(bRight)) { mode = MODE_NORMAL; rebuildHeader(true); rebuildListStatic(); }
   } else if (mode == MODE_NORMAL && inputsReady) {
     // Enter priority editor with LEFT/RIGHT holds
     bool enteredPrio = false;
@@ -1566,7 +1609,14 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
     if (!enteredPrio) {
       if (Btn::released(bUp)   && Btn::lastPressDurationMs(bUp)   < HOLD_START_MS) ensureSelectionVisibleAndDraw(-1);
       if (Btn::released(bDown) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) ensureSelectionVisibleAndDraw(+1);
-      // LEFT/RIGHT taps do nothing in NORMAL
+      // LEFT double-tap enters NAV; RIGHT double-tap remains for MOVE as before
+      // Handle LEFT double-tap detection
+      if (Btn::clicked(bLeft)) {
+        if (g_leftClicks == 0) { g_leftClicks = 1; g_leftLastClickMs = now; }
+        else if (now - g_leftLastClickMs <= MULTI_MS) {
+          g_leftClicks = 0; mode = MODE_NAV; rebuildHeader(true); rebuildListStatic();
+        } else { g_leftClicks = 1; g_leftLastClickMs = now; }
+      }
     }
   }
 
@@ -1595,6 +1645,12 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
       else if (n == 2) { if (mode == MODE_NORMAL) enterMoveMode(); else exitMoveMode(true); }
     }
     g_okAnchorUid = 0;
+  }
+
+  // Resolve LEFT double-tap window when in modes where we collect LEFT clicks
+  if ((mode == MODE_NORMAL || mode == MODE_NAV) && g_leftClicks > 0 && (now - g_leftLastClickMs > MULTI_MS)) {
+    // Single LEFT tap does nothing in NORMAL; in NAV we keep state
+    g_leftClicks = 0;
   }
 
   // Pending pipeline
