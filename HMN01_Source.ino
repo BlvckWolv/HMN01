@@ -170,10 +170,10 @@ const uint8_t FOOTER_BOTTOM_PAD = 0;
 
 // ---- Left navigation geometry ----
 static const int16_t NAV_PAD = 2; // 2px on all sides
-static const int16_t NAV_WIDTH = 36; // fixed width for the left nav bar
+static const int16_t NAV_WIDTH = 31; // fixed width for the left nav bar (thinner by 5px)
 static const int16_t NAV_HEIGHT = H - 2 * NAV_PAD; // height within top/bottom padding
-static const int16_t NAV_RADIUS = 6; // rounded corner radius (slightly less)
-static inline int16_t MAIN_LEFT() { return NAV_PAD + (int16_t)NAV_WIDTH + NAV_PAD; }
+static const int16_t NAV_RADIUS = 6; // less rounded corners
+static inline int16_t MAIN_LEFT() { return NAV_PAD + (int16_t)NAV_WIDTH + NAV_PAD + 3; }
 
 // ---------- Buttons ----------
 #define BTN_UP    A4
@@ -534,6 +534,99 @@ static inline uint16_t lerp565(uint16_t fg, uint16_t bg, uint8_t a) {
   return ((uint16_t)((r * 31 + 127) / 255) << 11) | ((uint16_t)((g * 63 + 127) / 255) << 5) | ((uint16_t)((b * 31 + 127) / 255));
 }
 
+// ---------- Pixel-art nav icons (15x15, '.' off, 'X' on) ----------
+// 5x5 masks scaled to 15x15 (3px blocks) for an 8-bit look
+// Replaced first icon with an 8-bit heart (frame A)
+static const char ICON_HEART_5_A[5][6] PROGMEM = {
+  ".X.X.",
+  "XXXXX",
+  "XXXXX",
+  ".XXX.",
+  "..X.."
+};
+
+// Heart (frame B): slightly larger middle to "beat"
+static const char ICON_HEART_5_B[5][6] PROGMEM = {
+  "XXXXX",
+  "XXXXX",
+  "XXXXX",
+  ".XXX.",
+  "..X.."
+};
+
+// Microchip (frame A)
+static const char ICON_CHIP_5_A[5][6] PROGMEM = {
+  "XXXXX",
+  "X...X",
+  "X.X.X",
+  "X...X",
+  "XXXXX"
+};
+
+// Microchip (frame B): blink center trace
+static const char ICON_CHIP_5_B[5][6] PROGMEM = {
+  "XXXXX",
+  "X...X",
+  "X...X",
+  "X.X.X",
+  "XXXXX"
+};
+
+// Target (frame A)
+static const char ICON_TARGET_5_A[5][6] PROGMEM = {
+  ".XXX.",
+  "X...X",
+  "X.X.X",
+  "X...X",
+  ".XXX."
+};
+
+// Target (frame B): flashing center
+static const char ICON_TARGET_5_B[5][6] PROGMEM = {
+  ".XXX.",
+  "X...X",
+  "X...X",
+  "X...X",
+  ".XXX."
+};
+
+// Skull (frame A)
+static const char ICON_SKULL_5_A[5][6] PROGMEM = {
+  ".XXX.",
+  "X.X.X",
+  "XXXXX",
+  ".X.X.",
+  ".X.X."
+};
+
+// Skull (frame B): eyes "blink"
+static const char ICON_SKULL_5_B[5][6] PROGMEM = {
+  ".XXX.",
+  "X...X",
+  "XXXXX",
+  ".X.X.",
+  ".X.X."
+};
+
+static void drawIcon15(Adafruit_GFX &canvas, int16_t left, int16_t top, uint8_t which, uint16_t color, bool altFrame) {
+  const char (*icon)[6];
+  switch (which) {
+    case 0: icon = altFrame ? ICON_HEART_5_B  : ICON_HEART_5_A;  break;
+    case 1: icon = altFrame ? ICON_CHIP_5_B   : ICON_CHIP_5_A;   break;
+    case 2: icon = altFrame ? ICON_TARGET_5_B : ICON_TARGET_5_A; break;
+    default: icon = altFrame ? ICON_SKULL_5_B : ICON_SKULL_5_A;  break;
+  }
+  const uint8_t cell = 3; // 3x3 blocks -> 15x15
+  for (uint8_t y=0; y<5; ++y) {
+    for (uint8_t x=0; x<5; ++x) {
+      char c = pgm_read_byte(&(icon[y][x]));
+      if (c != '.') {
+        canvas.fillRect(left + x*cell, top + y*cell, cell, cell, color);
+      }
+    }
+  }
+}
+
 // Alpha-matte sub-rect blit into a GFX (with bg color)
 static inline void blit565_matte_subrect(Adafruit_GFX &gfx, int16_t dx, int16_t dy,
   const uint16_t *rgb, const uint8_t *alpha, uint16_t srcW, uint16_t srcH,
@@ -558,9 +651,8 @@ static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
   // Background rounded bar spanning the full screen height (clipped by canvas)
   canvas.fillRoundRect(NAV_PAD, NAV_PAD - canvasTopGlobalY, NAV_WIDTH, NAV_HEIGHT, NAV_RADIUS, COL_NAV_BAR);
 
-  // Icon geometry
+  // Icon geometry (15x15 pixel-art icons)
   const int16_t iconSize = 15;
-  const int16_t iconRadius = 7;
   int16_t centerX = NAV_PAD + NAV_WIDTH/2;
   uint32_t nowMs = millis();
 
@@ -581,24 +673,10 @@ static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
     int16_t drawY = topGlobal - canvasTopGlobalY;
     if (drawY + iconSize < 0 || drawY >= canvas.height()) continue;
 
-    uint16_t baseColor = COL_ICON_GREY;
-    if (i == navIndex) {
-      switch(i) {
-        case 0: baseColor = COL_NAV_ICON0; break;
-        case 1: baseColor = COL_NAV_ICON1; break;
-        case 2: baseColor = COL_NAV_ICON2; break;
-        case 3: baseColor = COL_NAV_ICON3; break;
-      }
-    }
-    canvas.fillRoundRect(left, drawY, iconSize, iconSize, iconRadius, baseColor);
+    uint16_t iconColor = (i == navIndex) ? (i==0?COL_NAV_ICON0:i==1?COL_NAV_ICON1:i==2?COL_NAV_ICON2:COL_NAV_ICON3) : COL_ICON_GREY;
+    drawIcon15(canvas, left, drawY, i, iconColor);
 
-    if (i == navIndex && mode == MODE_NAV) {
-      // Pulse border around the selected square
-      uint8_t a = (uint8_t)((sinf((nowMs % 1000) * 0.006283185f) * 0.5f + 0.5f) * 120.0f) + 60;
-      uint16_t pulseCol = fade565(baseColor, COL_NAV_BAR, a);
-      canvas.drawRoundRect(left - 2, drawY - 2, iconSize + 4, iconSize + 4, iconRadius + 2, pulseCol);
-      canvas.drawRoundRect(left - 1, drawY - 1, iconSize + 2, iconSize + 2, iconRadius + 1, pulseCol);
-    }
+    // Removed square border pulse as requested
   }
 }
 void rebuildHeader(bool force=false) {
@@ -937,7 +1015,7 @@ void composeListFrame(float hlRowY) {
   int16_t brTop = rowCenterY - cbh/2 + TEXT_Y_TWEAK + BRACKET_Y_TWEAK;
   int16_t brBottom = brTop + cbh;
 
-  int16_t contentLeft  = MAINL - 6;
+  int16_t contentLeft  = MAINL - 3; // shift pill right by 3px to clear nav
   int16_t contentRight = W - 14 + 2;
   int16_t pillX = contentLeft, pillW = contentRight - contentLeft;
   int16_t pillY = brTop - (int16_t)HIL_GAP;
@@ -1510,7 +1588,7 @@ void setup() {
   COL_PRI_HIGH   = tft.color565(0xE7, 0x82, 0x84);
   COL_PRI_MED    = tft.color565(0xEF, 0x9F, 0x76);
   COL_CLOCK      = tft.color565(0x89, 0xDC, 0xEB);
-  COL_NAV_BAR    = tft.color565(0x8A, 0x8D, 0xD1); // lighter variant of #696bae
+  COL_NAV_BAR    = COL_TEXT; // match task font color
   // Nav icon palette: active colors as requested, with grey for inactive
   COL_NAV_ICON0  = tft.color565(0xA6, 0xDA, 0x95); // #a6da95
   COL_NAV_ICON1  = tft.color565(0x8A, 0xAD, 0xF4); // #8aadf4
