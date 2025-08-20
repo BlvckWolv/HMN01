@@ -1,4 +1,4 @@
-/// ========== My Day (Nano ESP32 / ST7789 320x170 + 5-way stick + NAV Home + PWM Backlight) ==========
+// ========== My Day (Nano ESP32 / ST7789 320x170 + 5-way stick + NAV Home + PWM Backlight) ==========
 // Buttons to GND (internal pullups): A4=UP, A3=OK, A2=DOWN, A5=LEFT, A6=RIGHT
 // OK: single toggle, double enter/exit MOVE, triple delete->confirm
 //
@@ -166,14 +166,14 @@ const int16_t LIST_CANVAS_H = H - HEADER_HEIGHT;
 const uint8_t TOP_PAD       = 2;
 const uint8_t FOOTER_BOTTOM_PAD = 0;
 
-#define ENABLE_PILL_PULSE 1
+#define ENABLE_PILL_PULSE 0
 
 // ---- Left navigation geometry ----
 static const int16_t NAV_PAD = 2; // 2px on all sides
 static const int16_t NAV_WIDTH = 32; // panel width (32x170)
 static const int16_t NAV_HEIGHT = H - 2 * NAV_PAD; // height within top/bottom padding
 static const int16_t NAV_RADIUS = 6; // less rounded corners
-static inline int16_t MAIN_LEFT() { return NAV_PAD + (int16_t)NAV_WIDTH + NAV_PAD + 3; }
+static inline int16_t MAIN_LEFT() { return (int16_t)NAV_WIDTH + NAV_PAD + 3; }
 
 // ---------- Buttons ----------
 #define BTN_UP    A4
@@ -182,18 +182,18 @@ static inline int16_t MAIN_LEFT() { return NAV_PAD + (int16_t)NAV_WIDTH + NAV_PA
 #define BTN_LEFT  A5
 #define BTN_RIGHT A6
 
-const uint16_t DEBOUNCE_MS = 20;
-const uint16_t MIN_PRESS_MS = 40;
-const uint16_t MIN_RELEASE_MS= 60;
-const uint16_t MULTI_MS = 350;
-const uint16_t HOLD_START_MS = 300;
-const uint16_t REPEAT_PERIOD_S = 90;
-const uint16_t REPEAT_PERIOD_F = 30;
-const uint32_t REPEAT_ACCEL1 = 600;
-const uint32_t REPEAT_ACCEL2 = 1200;
-const uint16_t PRIO_REPEAT_MS = 300;
-const uint8_t  ANIM_FRAMES = 6;
-const uint8_t  ANIM_DELAY_MS = 12;
+const uint16_t DEBOUNCE_MS = 12;
+const uint16_t MIN_PRESS_MS = 20;
+const uint16_t MIN_RELEASE_MS= 30;
+const uint16_t MULTI_MS = 300;
+const uint16_t HOLD_START_MS = 220;
+const uint16_t REPEAT_PERIOD_S = 70;
+const uint16_t REPEAT_PERIOD_F = 24;
+const uint32_t REPEAT_ACCEL1 = 400;
+const uint32_t REPEAT_ACCEL2 = 800;
+const uint16_t PRIO_REPEAT_MS = 200;
+const uint8_t  ANIM_FRAMES = 4;
+const uint8_t  ANIM_DELAY_MS = 8;
 const uint8_t  HIL_RADIUS = 3;
 const bool     HIL_BORDER_ENABLED = true;
 const bool     HIL_BORDER_ACCENT  = true;
@@ -223,6 +223,10 @@ uint16_t COL_PRI_HIGH, COL_PRI_MED, COL_CLOCK, COL_SHADOW;
 uint16_t COL_NAV_BAR;
 uint16_t COL_NAV_ICON0, COL_NAV_ICON1, COL_NAV_ICON2, COL_NAV_ICON3, COL_ICON_GREY;
 uint16_t COL_BOLT;
+uint16_t COL_TAB_HIL; // #a6d189
+uint16_t COL_NAV_SEL; // indicator bar
+uint16_t COL_DATE_TXT; // #b8c0e0
+uint16_t COL_SAVER_PILL; // #f5a97f
 
 // ---------- Tasks & Persistence ----------
 enum PendState  : uint8_t { PEND_NONE=0, PEND_WAIT=1, PEND_FADE=2 };
@@ -244,8 +248,11 @@ uint8_t  taskCount = 0;
 uint32_t nextUid = 1;
 
 // ---------- Modes ----------
-enum Mode : uint8_t { MODE_NORMAL=0, MODE_MOVE=1, MODE_CONFIRM_DELETE=2, MODE_READ=3, MODE_PRIO_EDIT=4, MODE_NAV=5 };
+enum Mode : uint8_t { MODE_NORMAL=0, MODE_MOVE=1, MODE_CONFIRM_DELETE=2, MODE_READ=3, MODE_PRIO_EDIT=4, MODE_NAV=5, MODE_SCREENSAVER=6 };
 Mode mode = MODE_NORMAL;
+enum TabPage : uint8_t { TAB_TASKS=0, TAB_COMPLETED=1 };
+TabPage currentPage = TAB_TASKS; // default page
+bool headerFocused = false; // when true, UP landed on header
 int8_t   prioEditDir = 0;
 uint32_t g_prioNextBumpMs = 0;
 
@@ -265,6 +272,60 @@ GFXcanvas16 listCanvas(W, LIST_CANVAS_H);
 uint32_t confirmIgnoreUntil = 0;
 uint32_t confirmDeleteUid   = 0;
 uint32_t inputSquelchUntil  = 0;
+
+// ---------- Filtered view helpers ----------
+static inline bool isVisibleInCurrentPage(uint8_t idx) {
+  if (idx >= taskCount) return false;
+  return (currentPage == TAB_TASKS) ? (!tasks[idx].done) : tasks[idx].done;
+}
+static int findNextVisible(int startIdx, int dir) {
+  int i = startIdx + dir;
+  while (i >= 0 && i < (int)taskCount) {
+    if (isVisibleInCurrentPage((uint8_t)i)) return i;
+    i += dir;
+  }
+  return -1;
+}
+static int visibleOffsetFromTop(uint8_t top, uint8_t sel) {
+  if (sel >= taskCount) return -1;
+  int offset = 0;
+  for (uint8_t i = top; i < taskCount && offset < VISIBLE_ROWS; ++i) {
+    if (isVisibleInCurrentPage(i)) {
+      if (i == sel) return offset;
+      offset++;
+    }
+  }
+  return -1;
+}
+static uint8_t computeTopIndexForSelection(uint8_t sel) {
+  if (taskCount == 0) return 0;
+  if (sel >= taskCount) sel = taskCount - 1;
+  int needBefore = (int)VISIBLE_ROWS - 1;
+  int before = 0;
+  int t = (int)sel;
+  for (int i = (int)sel - 1; i >= 0 && before < needBefore; --i) {
+    if (isVisibleInCurrentPage((uint8_t)i)) before++;
+    t = i;
+  }
+  if (t < 0) t = 0;
+  return (uint8_t)t;
+}
+
+static void ensureSelectionValidForPage() {
+  if (taskCount == 0) { selected = 0; topIndex = 0; return; }
+  if (!isVisibleInCurrentPage(selected)) {
+    int down = findNextVisible((int)selected, +1);
+    int up   = findNextVisible((int)selected, -1);
+    int pick = (down >= 0) ? down : up;
+    if (pick < 0) {
+      // Find first visible from start of list
+      for (uint8_t i=0;i<taskCount;i++) if (isVisibleInCurrentPage(i)) { pick = i; break; }
+    }
+    if (pick < 0) { selected = 0; topIndex = 0; headerFocused = true; return; }
+    selected = (uint8_t)pick;
+  }
+  topIndex = computeTopIndexForSelection(selected);
+}
 
 // ---------- Nav mode ----------
 uint8_t navIndex = 0; // 0..3
@@ -302,6 +363,11 @@ bool     g_marqueeActive = false;
 uint32_t g_marqueeStartMs = 0;
 uint32_t g_lastMarqueeFrame = 0;
 int16_t  g_marqueeOffsetPx = 0;
+// Screensaver
+const uint32_t SCREENSAVER_IDLE_MS = 30000; // 30s
+uint32_t g_lastUserInputMs = 0;
+uint32_t g_saverAnimStartMs = 0;
+uint8_t  g_mockBatteryPhase = 0; // 0..2 -> red, orange, green
 
 // ---------- Serial ----------
 const uint32_t SERIAL_BAUD = 115200;
@@ -618,7 +684,7 @@ static inline void blit565_matte_subrect(Adafruit_GFX &gfx, int16_t dx, int16_t 
 // ---------- Header ----------
 static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
   // Panel region
-  int16_t panelX = NAV_PAD;
+  int16_t panelX = 0; // extend to left edge
   int16_t panelY = NAV_PAD - canvasTopGlobalY;
   int16_t panelW = NAV_WIDTH;
   int16_t panelH = NAV_HEIGHT;
@@ -650,8 +716,8 @@ static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
 
   // Icon geometry (15x15 pixel-art icons)
   const int16_t iconSize = 15;
-  // Center icons within full panel width
-  int16_t centerX = NAV_PAD + NAV_WIDTH/2;
+  // Center icons within full panel width (panel starts at x=0 now)
+  int16_t centerX = NAV_WIDTH/2;
   uint32_t nowMs = millis();
 
   // Even spacing between icons and nav edges: NAV_HEIGHT = N*h + (N+1)*gap
@@ -671,6 +737,13 @@ static void drawNavOnCanvas(Adafruit_GFX &canvas, int16_t canvasTopGlobalY) {
     int16_t left = centerX - iconSize/2;
     int16_t drawY = topGlobal - canvasTopGlobalY;
     if (drawY + iconSize < 0 || drawY >= canvas.height()) continue;
+
+    // Selection indicator bar on the left of the icon (same height as icon)
+    if (i == navIndex) {
+      int16_t barW = 3; // thin rectangle
+      int16_t barX = 0; // flush with left edge
+      canvas.fillRect(barX, drawY, barW, iconSize, COL_NAV_SEL);
+    }
 
     uint16_t iconColor = (i == navIndex)
       ? (i==0?COL_NAV_ICON0 : i==1?COL_NAV_ICON1 : i==2?COL_NAV_ICON2 : i==3?COL_NAV_ICON3 : COL_NAV_ICON0)
@@ -785,32 +858,38 @@ void rebuildHeader(bool force=false) {
   headerCanvas.setTextWrap(false);
   headerCanvas.setTextSize(2);
   // Align left bracket with list brackets
-  headerCanvas.setCursor(MAINL + BRACKET_X_TWEAK, HEADER_Y_PAD);
+  int16_t curX = MAINL + BRACKET_X_TWEAK;
+
+  // Build label string (override in MOVE mode)
+  const char* label = (mode == MODE_MOVE) ? "Move" : ((currentPage == TAB_TASKS) ? "Task" : "Completed");
+  char fullLbl[32]; snprintf(fullLbl, sizeof(fullLbl), "[ %s ]", label);
+
+  // Measure text for tight highlight
+  int16_t tbx, tby; uint16_t tw, th;
+  headerCanvas.getTextBounds(fullLbl, 0, 0, &tbx, &tby, &tw, &th);
+  int16_t padX = 6, padY = 2;
+  // No background fill when focused; only brackets change color
+
+  // Draw "[ label ]" with original colors; special styling in MOVE mode
+  headerCanvas.setCursor(curX, HEADER_Y_PAD);
   if (mode == MODE_MOVE) {
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
-    headerCanvas.setTextColor(COL_MOVE,  COL_BG); headerCanvas.print("Move");
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
-  } else if (mode == MODE_CONFIRM_DELETE) {
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
-    headerCanvas.setTextColor(COL_MODAL_PANEL, COL_BG); headerCanvas.print("Delete");
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
-  } else if (mode == MODE_READ) {
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
-    headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print("View");
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
-  } else if (mode == MODE_PRIO_EDIT) {
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
-    headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print("Prio");
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
-  } else if (mode == MODE_NAV) {
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
-    headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print("Nav");
-    headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
+    // Brackets and label use pill color
+    headerCanvas.setTextColor(COL_MOVE, COL_BG); headerCanvas.print("[ ");
+    headerCanvas.setTextColor(COL_MOVE, COL_BG); headerCanvas.print(label);
+    headerCanvas.setTextColor(COL_MOVE, COL_BG); headerCanvas.print(" ]");
+  } else if (headerFocused) {
+    // Brackets green, label as COL_HIL on BG
+    headerCanvas.setTextColor(COL_TAB_HIL, COL_BG); headerCanvas.print("[ ");
+    headerCanvas.setTextColor(COL_HIL,      COL_BG); headerCanvas.print(label);
+    headerCanvas.setTextColor(COL_TAB_HIL, COL_BG); headerCanvas.print(" ]");
   } else {
     headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print("[ ");
-    headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print("Task");
+    headerCanvas.setTextColor(COL_HIL,   COL_BG); headerCanvas.print(label);
     headerCanvas.setTextColor(COL_WHITE, COL_BG); headerCanvas.print(" ]");
   }
+
+  // When focused, draw a pixel chevron arrow indicating direction
+  // (removed per request)
 
   // Time, aligned to right
   int16_t x1,y1; uint16_t w,hb;
@@ -821,7 +900,7 @@ void rebuildHeader(bool force=false) {
   headerCanvas.print(nowStr);
 
   // Brightness OSD moved to centered modal
-tft.drawRGBBitmap(0, 0, headerCanvas.getBuffer(), W, HEADER_HEIGHT);
+ tft.drawRGBBitmap(0, 0, headerCanvas.getBuffer(), W, HEADER_HEIGHT);
 
   strncpy(lastTime, nowStr, sizeof(lastTime)); lastTime[sizeof(lastTime)-1] = '\0';
   lastMode = mode;
@@ -1105,29 +1184,37 @@ void composeListFrame(float hlRowY) {
 
   uint16_t pillCol = (mode == MODE_MOVE) ? COL_MOVE : COL_HIL;
 
-  const int16_t shX = pillX + 1;
-  const int16_t shY = pillY + 2;
-  listCanvas.fillRoundRect(shX, shY, pillW, pillH, HIL_RADIUS + 1, COL_SHADOW);
-  listCanvas.fillRoundRect(pillX, pillY, pillW, pillH, HIL_RADIUS, pillCol);
+  if (mode != MODE_NAV) {
+    const int16_t shX = pillX + 1;
+    const int16_t shY = pillY + 2;
+    listCanvas.fillRoundRect(shX, shY, pillW, pillH, HIL_RADIUS + 1, COL_SHADOW);
+    listCanvas.fillRoundRect(pillX, pillY, pillW, pillH, HIL_RADIUS, pillCol);
+  }
 
 #if ENABLE_PILL_PULSE
-  if (mode != MODE_MOVE) {
+  if (mode != MODE_MOVE && mode != MODE_NAV) {
     uint32_t nowMs = millis();
-    uint8_t a = (uint8_t)((sinf((nowMs % 1000) * 0.006283185f) * 0.5f + 0.5f) * 120.0f) + 60;
+    // Stronger, sharper pixel pulse
+    uint8_t a = (uint8_t)((sinf((nowMs % 800) * 0.007853981f) * 0.5f + 0.5f) * 160.0f) + 80; // higher alpha range
     uint16_t pulseCol = fade565(COL_ACCENT, pillCol, a);
+    // Pixelated stepped border
     listCanvas.drawRoundRect(pillX - 1, pillY - 1, pillW + 2, pillH + 2, HIL_RADIUS + 1, pulseCol);
+    listCanvas.drawRoundRect(pillX - 3, pillY - 3, pillW + 6, pillH + 6, HIL_RADIUS + 2, fade565(pulseCol, COL_BG, 180));
   }
 #endif
 
-  if (HIL_BORDER_ENABLED && mode != MODE_MOVE) {
+  if (HIL_BORDER_ENABLED && mode != MODE_MOVE && mode != MODE_NAV) {
     uint16_t borderCol = HIL_BORDER_ACCENT ? COL_ACCENT : COL_BORDER;
     listCanvas.drawRoundRect(pillX, pillY, pillW, pillH, HIL_RADIUS, borderCol);
   }
 
   uint32_t now = millis();
-  for (uint8_t i=0; i<VISIBLE_ROWS; ++i) {
+  for (uint8_t i=0, drawn=0; drawn<VISIBLE_ROWS; ) {
     uint8_t idx = topIndex + i;
-    int16_t rowY = TOP_PAD + i * ROW_HEIGHT;
+    if (idx >= taskCount) break;
+    bool show = (currentPage == TAB_TASKS) ? (!tasks[idx].done) : (tasks[idx].done);
+    if (!show) { i++; continue; }
+    int16_t rowY = TOP_PAD + drawn * ROW_HEIGHT;
 
     int fadeAlpha = -1;
     uint16_t fadeBg = (idx == selected) ? pillCol : COL_BG;
@@ -1143,12 +1230,14 @@ void composeListFrame(float hlRowY) {
 
     int16_t mOffset = (g_marqueeActive && idx == selected) ? g_marqueeOffsetPx : -1;
     drawRowContentToCanvas(idx, rowY, fadeAlpha, fadeBg, mOffset, MAINL);
+    drawn++; i++;
   }
 
   // Footer counter
-  uint16_t left = (taskCount >= countDone()) ? (taskCount - countDone()) : 0;
-  uint16_t total = taskCount;
-  char nums[20]; snprintf(nums, sizeof(nums), "%u/%u", (unsigned)left, (unsigned)total);
+  uint16_t remaining = 0, completed = 0;
+  for (uint8_t i=0;i<taskCount;i++) { if (tasks[i].done) completed++; else remaining++; }
+  uint16_t displayCount = (currentPage == TAB_TASKS) ? remaining : completed;
+  char nums[20]; snprintf(nums, sizeof(nums), "%u", (unsigned)displayCount);
   char full[28]; snprintf(full, sizeof(full), "[ %s ]", nums);
 
   listCanvas.setTextSize(2);
@@ -1174,16 +1263,36 @@ void composeListFrame(float hlRowY) {
   if ((int32_t)(g_blOsdUntil - millis()) > 0 && mode != MODE_CONFIRM_DELETE && mode != MODE_READ) {
     drawBrightnessModalOnListCanvas();
   }
+
+  // "[ + ]" action on bottom-left, aligned under left brackets
+  {
+    int16_t addX = MAINL + BRACKET_X_TWEAK; // align with row left bracket
+    int16_t addY = ty; // align vertically with footer baseline
+    uint16_t ADD_COL = tft.color565(0xBA, 0xBB, 0xF1); // #babbf1
+    // Draw with white brackets and colored plus
+    listCanvas.setCursor(addX, addY);
+    listCanvas.setTextColor(COL_WHITE, COL_BG); listCanvas.print("[ ");
+    listCanvas.setTextColor(ADD_COL,  COL_BG); listCanvas.print("+");
+    listCanvas.setTextColor(COL_WHITE, COL_BG); listCanvas.print(" ]");
+  }
 }
 inline void flushList() {
   tft.drawRGBBitmap(0, LIST_CANVAS_Y, listCanvas.getBuffer(), W, LIST_CANVAS_H);
 }
-void rebuildListStatic() { float hlRowY = (selected - topIndex + 0.5f) * ROW_HEIGHT; composeListFrame(hlRowY); flushList(); }
+void rebuildListStatic() {
+  ensureSelectionValidForPage();
+  int visOff = visibleOffsetFromTop(topIndex, selected);
+  if (visOff < 0) visOff = 0;
+  float hlRowY = (visOff + 0.5f) * ROW_HEIGHT;
+  composeListFrame(hlRowY);
+  flushList();
+}
 
 // ---------- Anim ----------
-void animateHighlight(int8_t dir) {
-  float startY = (selected - topIndex + 0.5f - dir) * ROW_HEIGHT;
-  float endY   = (selected - topIndex + 0.5f) * ROW_HEIGHT;
+static void animateHighlightVis(int8_t startOff, int8_t endOff) {
+  if (startOff < 0) startOff = endOff;
+  float startY = (startOff + 0.5f) * ROW_HEIGHT;
+  float endY   = (endOff   + 0.5f) * ROW_HEIGHT;
   for (uint8_t f=1; f<=ANIM_FRAMES; ++f) {
     float t = (float)f / ANIM_FRAMES;
     float e = easeOutCubic(t);
@@ -1195,14 +1304,32 @@ void animateHighlight(int8_t dir) {
 // ---------- Movement & Helpers ----------
 void ensureSelectionVisibleAndDraw(int8_t moveDir) {
   uint8_t oldTop = topIndex, oldSel = selected;
-  if (moveDir > 0 && selected + 1 < taskCount) selected++;
-  else if (moveDir < 0 && selected > 0)        selected--;
-  if (selected >= topIndex + VISIBLE_ROWS) topIndex = selected - VISIBLE_ROWS + 1;
-  if (selected < topIndex) topIndex = selected;
+  // Move selection to next/prev visible item in the current page
+  if (moveDir > 0) {
+    int ns = findNextVisible((int)selected, +1);
+    if (ns >= 0) selected = (uint8_t)ns;
+  } else if (moveDir < 0) {
+    int ps = findNextVisible((int)selected, -1);
+    if (ps >= 0) selected = (uint8_t)ps;
+  }
+  // Adjust topIndex so that selected is within the visible window of filtered rows
+  {
+    int visOff = visibleOffsetFromTop(topIndex, selected);
+    if (visOff < 0) {
+      // selected not within current window; compute a new top
+      topIndex = computeTopIndexForSelection(selected);
+    } else {
+      // Keep selected centered in window as much as possible by recomputing top
+      topIndex = computeTopIndexForSelection(selected);
+    }
+  }
   if (selected != oldSel) { g_selStableSince = millis(); g_marqueeActive = false; }
   if (topIndex != oldTop || selected != oldSel) markUIDirty();
+  int oldVis = visibleOffsetFromTop(oldTop, oldSel);
+  int newVis = visibleOffsetFromTop(topIndex, selected);
+  if (oldVis < 0) oldVis = newVis;
   if (topIndex != oldTop) rebuildListStatic();
-  else if (selected != oldSel) animateHighlight((selected > oldSel) ? +1 : -1);
+  else if (selected != oldSel) animateHighlightVis((int8_t)oldVis, (int8_t)newVis);
 }
 
 inline void swapTasks(uint8_t i, uint8_t j) { Task tmp = tasks[i]; tasks[i] = tasks[j]; tasks[j] = tmp; }
@@ -1252,16 +1379,41 @@ void toggleByIndex(uint8_t idx) {
   if (idx >= taskCount) return;
   bool wasDone = tasks[idx].done;
   tasks[idx].done = !wasDone;
-  if (!wasDone && tasks[idx].done) {
-    tasks[idx].pend = PEND_WAIT;
-    tasks[idx].pendStartMs = millis();
-    tasks[idx].animStartMs = 0;
-  } else {
-    tasks[idx].pend = PEND_NONE;
-    tasks[idx].pendStartMs = 0;
-    tasks[idx].animStartMs = 0;
-  }
+  // Delete/complete animation disabled: no pending states
+  tasks[idx].pend = PEND_NONE;
+  tasks[idx].pendStartMs = 0;
+  tasks[idx].animStartMs = 0;
   saveTasksRuntime();
+  // Maintain selection within the current filtered view
+  {
+    int nextSel = -1;
+    if (currentPage == TAB_TASKS) {
+      // If we just completed an item while in Tasks, select the next remaining task
+      if (tasks[idx].done) {
+        nextSel = findNextVisible((int)idx, +1);
+        if (nextSel < 0) nextSel = findNextVisible((int)idx, -1);
+      } else {
+        // We un-completed an item while in Tasks (it remains visible): keep selection on it
+        nextSel = (int)idx;
+      }
+    } else { // TAB_COMPLETED
+      // If we just un-completed an item while in Completed, select the next completed
+      if (!tasks[idx].done) {
+        nextSel = findNextVisible((int)idx, +1);
+        if (nextSel < 0) nextSel = findNextVisible((int)idx, -1);
+      } else {
+        // We completed an item while in Completed (it remains visible): keep selection on it
+        nextSel = (int)idx;
+      }
+    }
+    if (nextSel >= 0) {
+      selected = (uint8_t)nextSel;
+      topIndex = computeTopIndexForSelection(selected);
+    } else {
+      // No items left in this view; clamp indices safely
+      selected = 0; topIndex = 0;
+    }
+  }
   g_selStableSince = millis(); g_marqueeActive = false; rebuildListStatic();
 }
 void toggleByUid(uint32_t uid) {
@@ -1674,6 +1826,10 @@ void setup() {
   COL_NAV_ICON3  = tft.color565(0xF5, 0xBD, 0xE6); // #f5bde6
   COL_ICON_GREY  = tft.color565(0x83, 0x8B, 0xA7); // grey
   COL_BOLT       = tft.color565(0x8A, 0xAD, 0xF4); // bolt heads (blue)
+  COL_TAB_HIL    = tft.color565(0xA6, 0xD1, 0x89); // #a6d189
+  COL_NAV_SEL    = tft.color565(0xC6, 0xD0, 0xF5); // #c6d0f5
+  COL_DATE_TXT   = tft.color565(0xB8, 0xC0, 0xE0); // #b8c0e0
+  COL_SAVER_PILL = tft.color565(0xF5, 0xA9, 0x7F); // #f5a97f
 
   tft.fillScreen(COL_BG);
   COL_SHADOW = fade565(COL_BLACK, COL_BG, 80);
@@ -1713,6 +1869,12 @@ void loop() {
   Btn::update(bRight);
   Btn::update(bOk);
 
+  // Track user activity to control screensaver
+  bool anyEdge = Btn::pressed(bUp) || Btn::pressed(bDown) || Btn::pressed(bLeft) || Btn::pressed(bRight) || Btn::pressed(bOk)
+              || Btn::released(bUp) || Btn::released(bDown) || Btn::released(bLeft) || Btn::released(bRight) || Btn::released(bOk)
+              || Btn::clicked(bUp) || Btn::clicked(bDown) || Btn::clicked(bLeft) || Btn::clicked(bRight) || Btn::clicked(bOk);
+  if (anyEdge) g_lastUserInputMs = now;
+
   bool inputsReady = ((int32_t)(now - inputSquelchUntil) >= 0);
 
   // Long-hold OK to read
@@ -1721,6 +1883,80 @@ void loop() {
   }
 
   // ===== MODE handlers =====
+  // Enter screensaver on idle
+  if (mode != MODE_SCREENSAVER && (uint32_t)(now - g_lastUserInputMs) >= SCREENSAVER_IDLE_MS) {
+    mode = MODE_SCREENSAVER; g_saverAnimStartMs = now; g_mockBatteryPhase = 0; rebuildHeader(true);
+  }
+  // Wake from screensaver on any input
+  if (mode == MODE_SCREENSAVER && anyEdge) {
+    mode = MODE_NORMAL; g_lastUserInputMs = now; rebuildHeader(true); rebuildListStatic();
+  }
+  if (mode == MODE_SCREENSAVER) {
+    // Draw screensaver frame and return
+    // Use off-screen canvases to avoid flicker
+    GFXcanvas16 saver(W, H);
+    saver.fillScreen(COL_BG);
+    // Time large + date smaller
+    char timeStr[16];
+    uint32_t elapsedMs = millis() - clockStartMs;
+    uint32_t totalMin = startHour * 60UL + startMin + (elapsedMs / 60000UL);
+    uint8_t hh = (totalMin / 60U) % 24U;
+    uint8_t mm = (uint8_t)(totalMin % 60U);
+    bool pm = (hh >= 12); uint8_t h12 = hh % 12; if (h12 == 0) h12 = 12;
+    snprintf(timeStr, sizeof(timeStr), "%u:%02u %s", h12, mm, pm?"PM":"AM");
+    // Center time
+    saver.setTextWrap(false);
+    saver.setTextSize(3);
+    int16_t bx, by; uint16_t tw, th;
+    saver.getTextBounds(timeStr, 0, 0, &bx, &by, &tw, &th);
+    int16_t tx = (W - (int16_t)tw) / 2;
+    int16_t ty = HEADER_HEIGHT + (LIST_CANVAS_H/2) - th - 6;
+    saver.setTextColor(COL_WHITE, COL_BG);
+    saver.setCursor(tx, ty); saver.print(timeStr);
+    // Mock date below (fixed string)
+    const char* dateStr = "Thu 08/22";
+    saver.setTextSize(2);
+    int16_t dx, dy; uint16_t dw, dh;
+    saver.getTextBounds(dateStr, 0, 0, &dx, &dy, &dw, &dh);
+    int16_t dtx = (W - (int16_t)dw) / 2;
+    int16_t dty = ty + th + 10 - dy;
+    // Orange pill behind date
+    int16_t pillPadX = 10, pillPadY = 4;
+    int16_t pdw = (int16_t)dw + pillPadX*2;
+    int16_t pdh = (int16_t)dh + pillPadY*2;
+    saver.fillRoundRect(dtx - pillPadX, dty - pillPadY, pdw, pdh, 4, COL_SAVER_PILL);
+    saver.setCursor(dtx, dty); saver.setTextColor(COL_WHITE, COL_SAVER_PILL); saver.print(dateStr);
+    // Bottom-left remaining tasks (text only, flush-left)
+    uint16_t remaining=0, completed=0; for (uint8_t i=0;i<taskCount;i++){ if (tasks[i].done) completed++; else remaining++; }
+    uint16_t COL_LEFT = tft.color565(0x91,0xD7,0xE3); // #91d7e3
+    saver.setTextSize(2);
+    saver.setCursor(0, H - 6 - 16);
+    saver.setTextColor(COL_WHITE, COL_BG); saver.print("[ ");
+    saver.setTextColor(COL_LEFT,  COL_BG); saver.print(remaining);
+    saver.setTextColor(COL_WHITE, COL_BG); saver.print(" ]");
+    // Top-right 8-bit battery
+    uint16_t batCol = (g_mockBatteryPhase==0)? tft.color565(0xE7,0x82,0x84) : (g_mockBatteryPhase==1? tft.color565(0xEF,0x9F,0x76) : tft.color565(0xA6,0xDA,0x95));
+    int16_t bx0 = W - 6 - 28;
+    int16_t by0 = 6;
+    int16_t bw  = 28, bh = 14;
+    // 8-bit chunky outline (thicker)
+    for (int8_t o = 0; o < 3; ++o) {
+      saver.drawRect(bx0 - o, by0 - o, bw + 2*o, bh + 2*o, COL_WHITE);
+    }
+    saver.fillRect(bx0 + bw, by0 + (bh/2 - 2), 3, 4, COL_WHITE);
+    // Pixel bars
+    for (uint8_t k=0;k<4;k++) {
+      int16_t segW = 5, segH = 8, gap=2;
+      int16_t sx = bx0 + 2 + k*(segW + gap);
+      int16_t sy = by0 + 3;
+      saver.fillRect(sx, sy, segW, segH, batCol);
+    }
+    // cycle battery color every 1.2s
+    if ((uint32_t)(now - g_saverAnimStartMs) >= 1200) { g_saverAnimStartMs = now; g_mockBatteryPhase = (uint8_t)((g_mockBatteryPhase + 1) % 3); }
+    // Blit once
+    tft.drawRGBBitmap(0, 0, saver.getBuffer(), W, H);
+    return;
+  }
   if (mode == MODE_MOVE && inputsReady) {
     if (Btn::pressed(bUp) || Btn::repeat(bUp))   moveSelectedRow(-1);
     if (Btn::pressed(bDown) || Btn::repeat(bDown)) moveSelectedRow(+1);
@@ -1754,15 +1990,24 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
     }
   } else if (mode == MODE_NAV && inputsReady) {
     // Navigate between 4 icons using UP/DOWN; exit with double LEFT again or single RIGHT
-    if (Btn::released(bUp)   && Btn::lastPressDurationMs(bUp)   < HOLD_START_MS) {
+    if (Btn::pressed(bUp) || Btn::repeat(bUp)) {
       if (navIndex > 0) navIndex--;
       if (navIndex < navScrollTop) navScrollTop = navIndex;
       rebuildHeader(true); rebuildListStatic();
     }
-    if (Btn::released(bDown) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) {
+    if (Btn::pressed(bDown) || Btn::repeat(bDown)) {
       if (navIndex + 1 < NAV_TOTAL) navIndex++;
       if (navIndex >= navScrollTop + NAV_VISIBLE) navScrollTop = navIndex - NAV_VISIBLE + 1;
       rebuildHeader(true); rebuildListStatic();
+    }
+    // Double-tap LEFT to exit NAV
+    if (Btn::clicked(bLeft)) {
+      if (g_leftClicks == 0) { g_leftClicks = 1; g_leftLastClickMs = now; }
+      else if (now - g_leftLastClickMs <= MULTI_MS) {
+        // Second tap within window: exit NAV
+        mode = MODE_NORMAL; g_leftClicks = 0; g_leftLastClickMs = 0;
+        rebuildHeader(true); rebuildListStatic();
+      } else { g_leftClicks = 1; g_leftLastClickMs = now; }
     }
     if (Btn::clicked(bRight)) { mode = MODE_NORMAL; rebuildHeader(true); rebuildListStatic(); }
   } else if (mode == MODE_NORMAL && inputsReady) {
@@ -1772,21 +2017,46 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
     else if (Btn::holdStart(bLeft)) { enterPrioEdit(-1); enteredPrio = true; }
 
     if (!enteredPrio) {
-      if (Btn::released(bUp)   && Btn::lastPressDurationMs(bUp)   < HOLD_START_MS) ensureSelectionVisibleAndDraw(-1);
-      if (Btn::released(bDown) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) ensureSelectionVisibleAndDraw(+1);
-      // LEFT double-tap enters NAV; RIGHT double-tap remains for MOVE as before
-      // Handle LEFT double-tap detection
+      // Compute visible offset once for UP handling
+      int visOff = visibleOffsetFromTop(topIndex, selected);
+      // Focus header when at top-of-window; otherwise let UP move selection
+      if (!headerFocused && Btn::released(bUp) && Btn::lastPressDurationMs(bUp) < HOLD_START_MS && visOff == 0) {
+        headerFocused = true; rebuildHeader(true);
+      } else if (headerFocused) {
+        // Toggle page with RIGHT/LEFT; DOWN returns to list
+        if (Btn::released(bRight) && Btn::lastPressDurationMs(bRight) < HOLD_START_MS) {
+          currentPage = TAB_COMPLETED; ensureSelectionValidForPage(); rebuildHeader(true); rebuildListStatic();
+        }
+        if (Btn::released(bLeft)  && Btn::lastPressDurationMs(bLeft)  < HOLD_START_MS) {
+          currentPage = TAB_TASKS;     ensureSelectionValidForPage(); rebuildHeader(true); rebuildListStatic();
+        }
+        if (Btn::released(bDown)  && Btn::lastPressDurationMs(bDown)  < HOLD_START_MS) { headerFocused = false; rebuildHeader(true); }
+      } else {
+        if ((Btn::pressed(bUp) || Btn::repeat(bUp)) && Btn::lastPressDurationMs(bUp) < HOLD_START_MS) {
+          // Prefer moving to previous visible; if none, focus header
+          int prev = findNextVisible((int)selected, -1);
+          if (prev >= 0) ensureSelectionVisibleAndDraw(-1);
+          else { headerFocused = true; rebuildHeader(true); }
+        }
+        if ((Btn::pressed(bDown) || Btn::repeat(bDown)) && Btn::lastPressDurationMs(bDown) < HOLD_START_MS) ensureSelectionVisibleAndDraw(+1);
+      }
+      // Double-tap LEFT to enter NAV in NORMAL
       if (Btn::clicked(bLeft)) {
         if (g_leftClicks == 0) { g_leftClicks = 1; g_leftLastClickMs = now; }
         else if (now - g_leftLastClickMs <= MULTI_MS) {
-          g_leftClicks = 0; mode = MODE_NAV; rebuildHeader(true); rebuildListStatic();
+          // Enter NAV
+          mode = MODE_NAV; g_leftClicks = 0; g_leftLastClickMs = 0;
+          // Ensure current navIndex is within window
+          if (navIndex < navScrollTop) navScrollTop = navIndex;
+          if (navIndex >= navScrollTop + NAV_VISIBLE) navScrollTop = navIndex - NAV_VISIBLE + 1;
+          rebuildHeader(true); rebuildListStatic();
         } else { g_leftClicks = 1; g_leftLastClickMs = now; }
       }
     }
   }
 
-  // OK multi-clicks (not in confirm/read/prio)
-  if (mode != MODE_CONFIRM_DELETE && mode != MODE_READ && mode != MODE_PRIO_EDIT && inputsReady && Btn::clicked(bOk)) {
+  // OK multi-clicks (not in confirm/read/prio/nav)
+  if (mode != MODE_CONFIRM_DELETE && mode != MODE_READ && mode != MODE_PRIO_EDIT && mode != MODE_NAV && inputsReady && Btn::clicked(bOk)) {
     if (g_okClicks == 0) {
       g_okClicks = 1; g_okLastClickMs = now;
       g_okAnchorUid = (selected < taskCount) ? tasks[selected].uid : 0;
@@ -1794,19 +2064,25 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
       g_okClicks++; g_okLastClickMs = now;
       if (g_okClicks >= 3) { enterConfirmDelete(g_okAnchorUid); g_okClicks = 0; g_okAnchorUid = 0; }
     } else {
-      if (mode != MODE_MOVE && g_okAnchorUid) toggleByUid(g_okAnchorUid);
+      // Timing window expired; start a fresh single-click sequence
       g_okClicks = 1; g_okLastClickMs = now;
       g_okAnchorUid = (selected < taskCount) ? tasks[selected].uid : 0;
     }
   }
 
   // Resolve single/double after window
-  if (mode != MODE_CONFIRM_DELETE && mode != MODE_READ && mode != MODE_PRIO_EDIT && g_okClicks > 0 && (now - g_okLastClickMs > MULTI_MS)) {
+  if (mode != MODE_CONFIRM_DELETE && mode != MODE_READ && mode != MODE_PRIO_EDIT && mode != MODE_NAV && g_okClicks > 0 && (now - g_okLastClickMs > MULTI_MS)) {
     uint8_t n = g_okClicks; g_okClicks = 0;
     if (mode == MODE_MOVE) {
       if (n == 2) exitMoveMode(true);
     } else {
-      if (n == 1) { if (g_okAnchorUid) toggleByUid(g_okAnchorUid); }
+      if (n == 1) {
+        if (g_okAnchorUid) {
+          // Prevent toggling if current selection is hidden in this tab
+          int idx = findIndexByUid(g_okAnchorUid);
+          if (idx >= 0 && isVisibleInCurrentPage((uint8_t)idx)) toggleByUid(g_okAnchorUid);
+        }
+      }
       else if (n == 2) { if (mode == MODE_NORMAL) enterMoveMode(); else exitMoveMode(true); }
     }
     g_okAnchorUid = 0;
@@ -1819,20 +2095,7 @@ if (g_blPct < BL_MAX_PCT) setBacklightPct(g_blPct + BL_STEP, true);
   }
 
   // Pending pipeline
-  bool changed = false, anyFading = false;
-  for (uint8_t i = 0; i < taskCount; ) {
-    if (tasks[i].pend == PEND_WAIT) {
-      if ((int32_t)(now - tasks[i].pendStartMs) >= (int32_t)PENDING_DELAY_MS) {
-        tasks[i].pend = PEND_FADE; tasks[i].animStartMs = now; changed = true;
-      }
-      i++;
-    } else if (tasks[i].pend == PEND_FADE) {
-      uint32_t elapsed = now - tasks[i].animStartMs;
-      if (elapsed >= FADE_ANIM_MS) { performMoveToBottom(i); changed = true; }
-      else { anyFading = true; i++; }
-    } else i++;
-  }
-  if ((changed || anyFading) && mode != MODE_READ) rebuildListStatic();
+  // Disabled delete/complete animation
 
   // Auto marquee
   if (mode == MODE_NORMAL && taskCount > 0) {
